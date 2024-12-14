@@ -16,18 +16,28 @@
 #include "util/Sorting.h"
 #include "util/Arena.h"
 
+typedef Sound       sound;
+typedef Color       color;
+typedef Texture2D   texture2D;
+typedef Image       image2D;
+typedef Music       music;
+typedef AudioStream audio_stream;
+typedef Wave        wav_file;
+typedef Sound       sound_data;
+
 global_variable real32 DeltaTime;
 
 constexpr uint32 MAX_ENTITIES = 1000;
 
 constexpr uint32 IterationCounter = 2;
 constexpr real32 TickRate = 1 / IterationCounter;
-constexpr real32 InAirFriction = 2.0f;
+constexpr real32 InAirFriction = 12.0f;
 
 constexpr real32 EPSILON = 0.04f;
 
 enum physics_body_type
 {
+    PB_Null,
     PB_Dynamic,
     PB_Static,
 };
@@ -107,7 +117,7 @@ struct collision_data
     bool32  Collision;
     vec2    Position;
     vec2    Depth;
-    vec2    Normal;
+    ivec2   Normal;
     real32  Time;
  
     entity *CollidedEntity;
@@ -195,13 +205,35 @@ SetupEntityFloorTile(entity *Entity)
     Entity->PhysicsBodyData.Friction = 12.0f;
 }
 
+internal void
+SetupEntityWallTile(entity *Entity)
+{
+    Entity->Archetype  = ARCH_MAP_WALL;
+    Entity->RenderSize = {10, 400};
+    Entity->LayerIndex = LAYER_Player;
+
+    Entity->PhysicsBodyData.BodyType = PB_Static;
+    Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
+    Entity->PhysicsBodyData.Friction = 12.0f;
+}
+
+internal void
+DrawEntity(entity *Entity, Color DrawColor)
+{
+    DrawRectangle((int)Entity->Position.X - int(Entity->RenderSize.X * 0.5f),
+                  (int)Entity->Position.Y - int(Entity->RenderSize.Y * 0.5f),
+                  (int)Entity->RenderSize.X,
+                  (int)Entity->RenderSize.Y,
+                  DrawColor);
+}
+
 internal vec2 
 CalculateCollisionDepth(aabb TestBox)
 {
     vec2 Result = {};
     
     real32 MinDist = fabsf(TestBox.Min.X);
-    Result.X = MinDist;
+    Result.X = TestBox.Min.X;
     Result.Y = 0;
 
     if(fabsf(TestBox.Max.X) < MinDist)
@@ -258,67 +290,65 @@ IsCollision(aabb A, aabb B)
 }
 
 internal collision_data
-RaycastIsColliding(vec2 Position, vec2 Magnitude, aabb AABB)
+DoesRayIntersect(vec2 Position, vec2 Magnitude, aabb SumAABB)
 {
     collision_data Result = {};
+
     real32 LastEntry = -INFINITY;
-    real32 FirstExit =  INFINITY; 
+    real32 FirstExit =  INFINITY;
 
-    vec2 Min = AABB.Position - AABB.HalfSize;
-    vec2 Max = AABB.Position + AABB.HalfSize;
-
-    for(uint32 DimensionIndex = 0;
-        DimensionIndex < 2;
-        ++DimensionIndex)
+    for(uint32 DI = 0;
+        DI < 2;
+        ++DI)
     {
-        if(Magnitude[DimensionIndex] != 0)
+        if(Magnitude[DI] != 0)
         {
-            real32 T1 = (Min[DimensionIndex] - Position[DimensionIndex]) / Magnitude[DimensionIndex];
-            real32 T2 = (Max[DimensionIndex] - Position[DimensionIndex]) / Magnitude[DimensionIndex];
+            real32 Time1 = (SumAABB.Min[DI] - Position[DI]) / Magnitude[DI];
+            real32 Time2 = (SumAABB.Max[DI] - Position[DI]) / Magnitude[DI];
 
-            LastEntry = fmaxf(LastEntry, fminf(T1, T2));
-            FirstExit = fminf(FirstExit, fmaxf(T1, T2));
+            LastEntry = fmaxf(LastEntry, fminf(Time1, Time2));
+            FirstExit = fminf(FirstExit, fmaxf(Time1, Time2));
         }
-        else if(Position[DimensionIndex] <= Min[DimensionIndex] || Position[DimensionIndex] >= Max[DimensionIndex])
+        else if(Position[DI] <= SumAABB.Min[DI] || Position[DI] >= SumAABB.Max[DI])
         {
             return(Result);
         }
     }
 
-    if(FirstExit > LastEntry && FirstExit > 0 && FirstExit < 1)
+    if(FirstExit > LastEntry && FirstExit > 0 && LastEntry < 1)
     {
-        return(Result);
-    }
+        Result.Position.X = Position.X + Magnitude.X * LastEntry;
+        Result.Position.Y = Position.Y + Magnitude.Y * LastEntry;
 
-        Result.Position[0]  = Position[0] + Magnitude[0] * LastEntry;
-        Result.Position[1]  = Position[1] + Magnitude[1] * LastEntry;
-
-        Result.Time      = LastEntry;
         Result.Collision = true;
+        Result.Time = LastEntry;
 
-        real32 dX = Result.Position[0] - AABB.Position[0];
-        real32 dY = Result.Position[1] - AABB.Position[1];
-        real32 pX = AABB.HalfSize[0] - fabsf(dX);
-        real32 pY = AABB.HalfSize[1] - fabsf(dY);
+        real32 dx = Result.Position.X - SumAABB.Position.X;
+        real32 dy = Result.Position.Y - SumAABB.Position.Y;
 
-        if(pX < pY)
+        real32 px = SumAABB.HalfSize.X - fabsf(dx);
+        real32 py = SumAABB.HalfSize.Y - fabsf(dy);
+
+        if(px < py)
         {
-            Result.Normal[0] = real32(dX > 0.0f) - real32(dX < 0.0f);
+            Result.Normal.X = (dx > 0) ? 1 : -1;
         }
         else
         {
-            Result.Normal[1] = real32(dY > 0.0f) - real32(dY < 0.0f);
+            Result.Normal.Y = (dy > 0) ? 1 : -1;
         }
+    }
     
     return(Result);
 }
 
 internal collision_data
-SweepAndRespond(game_state *GameState, entity *Entity) 
+SweepEntitiesForCollision(game_state *GameState, entity *Entity, vec2 ScaledVelocity) 
 {
     collision_data CollisionData = {};
     CollisionData.Time = 0xBEEF;
 
+    physics_body *Body = &Entity->PhysicsBodyData;
     for(uint32 EntityIndex = 0;
         EntityIndex < MAX_ENTITIES;
         ++EntityIndex)
@@ -326,30 +356,84 @@ SweepAndRespond(game_state *GameState, entity *Entity)
         entity *TestEntity = &GameState->Entities[EntityIndex];
         if(((TestEntity->Flags & IS_VALID) != 0) && TestEntity->EntityID != Entity->EntityID)
         {
-            physics_body *Body = &Entity->PhysicsBodyData;
             physics_body *BodyToTest = &TestEntity->PhysicsBodyData;
             
-            vec2 Magnitude = BodyToTest->CollisionRect.Position - Body->CollisionRect.Position;
-            aabb MinkowskiAABB  = CalculateMinkowskiDifference(Body->CollisionRect, BodyToTest->CollisionRect);
-            collision_data Data = RaycastIsColliding(Entity->Position, Magnitude, MinkowskiAABB);
-            if(Data.Collision)
+            aabb SumAABB = CalculateMinkowskiDifference(BodyToTest->CollisionRect, Body->CollisionRect);
+            collision_data Impact = DoesRayIntersect(Entity->Position, ScaledVelocity, SumAABB);
+            if(Impact.Collision)
             {
-                if(Data.Normal.X != 0)
+                if(Impact.Time < CollisionData.Time)
                 {
-                    Entity->Position.X -= Body->Velocity.X * DeltaTime;
-                    Body->Velocity.X = 0;
+                    CollisionData = Impact;
                 }
-                else if(Data.Normal.Y != 0)
+                else if(Impact.Time == CollisionData.Time)
                 {
-                    Entity->Position.Y -= Body->Velocity.Y * DeltaTime;
-                    Body->Velocity.Y = 0;
+                    if(fabsf(ScaledVelocity.X) > fabsf(ScaledVelocity.Y) && Impact.Normal.X != 0)
+                    {
+                        CollisionData = Impact;
+                    }
+                    else if(fabsf(ScaledVelocity.Y) > fabsf(ScaledVelocity.X) && Impact.Normal.Y != 0)
+                    {
+                        CollisionData = Impact;
+                    }
                 }
-
-                Data.CollidedEntity = TestEntity;
             }
         }
     }
+
+    if(CollisionData.Collision)
+    {
+        if(CollisionData.Normal.X != 0)
+        {
+            Entity->Position.X += ScaledVelocity.X;
+        }
+        else if(CollisionData.Normal.Y != 0)
+        {
+            Entity->Position.Y += ScaledVelocity.Y;
+        }
+        else
+        {
+            Entity->Position += ScaledVelocity;
+        }
+    }
+    
     return(CollisionData);
+}
+
+internal void 
+EntityCollisionResponse(game_state *GameState, entity *Entity)
+{
+    physics_body *Body = &Entity->PhysicsBodyData;
+    for(uint32 EntityIndex = 0;
+        EntityIndex < MAX_ENTITIES;
+        ++EntityIndex)
+    {
+        entity *TestEntity = &GameState->Entities[EntityIndex];
+        if(((TestEntity->Flags & IS_VALID) != 0) && TestEntity->EntityID != Entity->EntityID)
+        {
+            physics_body *TestBody = &TestEntity->PhysicsBodyData;
+            aabb MinkowskiBody = CalculateMinkowskiDifference(TestBody->CollisionRect, Body->CollisionRect);
+            if(MinkowskiBody.Min.X <= 0 && MinkowskiBody.Max.X >= 0 && MinkowskiBody.Min.Y <= 0 && MinkowskiBody.Max.Y >= 0)
+            {
+                Body->IsColliding = true;
+
+                vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
+                Entity->Position += DepthVector;
+                if(DepthVector.X != 0)
+                {
+                    Body->Velocity.X = 0;
+                }
+                else if(DepthVector.Y != 0)
+                {
+                    Body->Velocity.Y = 0;
+                }
+            }
+            else
+            {
+                Body->IsColliding = false;
+            }
+        }
+    }
 }
 
 internal void
@@ -372,26 +456,29 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
         Body->CollisionRect.Position = Entity->Position;
         Body->CollisionRect.Min = Body->CollisionRect.Position - Body->CollisionRect.HalfSize;
         Body->CollisionRect.Max = Body->CollisionRect.Position + Body->CollisionRect.HalfSize;
-
         Body->Acceleration = vec2{0};
+
+        vec2 ScaledVelocity = v2Scale(Body->Velocity, DeltaTime * TickRate);
 
         for(uint32 IterationIndex = 0;
             IterationIndex < IterationCounter;
             ++IterationIndex)
         {
-            SweepAndRespond(GameState, Entity);
+            SweepEntitiesForCollision(GameState, Entity, ScaledVelocity);
+            EntityCollisionResponse(GameState, Entity);
         }
     }
 }
 
 internal void
-DrawEntity(entity *Entity, Color DrawColor)
+AdjustStaticObjectPosition(entity *Entity, vec2 Position)
 {
-    DrawRectangle((int)Entity->Position.X - int(Entity->RenderSize.X * 0.5f),
-                  (int)Entity->Position.Y - int(Entity->RenderSize.Y * 0.5f),
-                  (int)Entity->RenderSize.X,
-                  (int)Entity->RenderSize.Y,
-                  DrawColor);
+    physics_body *Body = &Entity->PhysicsBodyData;
+    
+    Entity->Position = Position;
+    Body->CollisionRect.Position = Entity->Position;
+    Body->CollisionRect.Min = Body->CollisionRect.Position - Body->CollisionRect.HalfSize;
+    Body->CollisionRect.Max = Body->CollisionRect.Position + Body->CollisionRect.HalfSize;
 }
 
 int 
@@ -401,10 +488,10 @@ main()
 
     GameState.WindowSizeData = {1920, 1080};
     GameState.Gravity = -4;
+    GameState.MaxG = -400;
     
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(GameState.WindowSizeData.X, GameState.WindowSizeData.Y, "Save The Prince");
-    InitAudioDevice();
 
     // NOTE(Sleepster): Memory Setup
     {
@@ -427,13 +514,23 @@ main()
 
     entity *Floor = CreateEntity(&GameState);
     SetupEntityFloorTile(Floor);
+    AdjustStaticObjectPosition(Floor, vec2{0, 0});
 
+    entity *Wall = CreateEntity(&GameState);
+    SetupEntityWallTile(Wall);
+    AdjustStaticObjectPosition(Wall, vec2{400, 0});
+
+    entity *Wall2 = CreateEntity(&GameState);
+    SetupEntityWallTile(Wall2);
+    AdjustStaticObjectPosition(Wall2, vec2{-400, 0});
+
+    real32 Accumulator = 0;
     while(!WindowShouldClose())
     {
         GameState.WindowSizeData.X = GetRenderWidth();
         GameState.WindowSizeData.Y = GetRenderHeight();
         
-        GameState.SceneCamera.target = {0, 0};
+        //v2Approach(&DrawFrame->SceneCamera.Position, DrawFrame->SceneCamera.Target, 5.0f, Time.Delta);
         GameState.SceneCamera.offset = {real32(GameState.WindowSizeData.X * 0.5f), (real32)(GameState.WindowSizeData.Y * 0.5f)};
         // NOTE(Sleepster): Raylib by default is flipped, meaning a change in the Positive Y direction yields a downward movement.
         // This fixes that but it might introduce some bugs down the line so I'm just putting this here
@@ -443,7 +540,14 @@ main()
         Vector2 RaylibWorldToScreenMousePos = GetScreenToWorld2D(RaylibMousePos, GameState.SceneCamera);
         vec2    MousePos = vec2{RaylibWorldToScreenMousePos.x, RaylibWorldToScreenMousePos.y};
 
+        DrawFPS(0, 10);
         DeltaTime = GetFrameTime();
+        Accumulator += DeltaTime;
+        if(Accumulator >= 1.0f)
+        {
+            printm("FrameTime: %f\n", DeltaTime * 100);
+            Accumulator = 0;
+        }
 
         ClearBackground(DARKGRAY);
         BeginDrawing();
@@ -459,14 +563,17 @@ main()
                 case ARCH_PLAYER:
                 {
                     ProcessMovement(Temp);
+
+                    vec2 CameraPosition = vec2{GameState.SceneCamera.target.x, GameState.SceneCamera.target.y};
+                    v2Approach(&CameraPosition, Temp->Position, 10.0f, DeltaTime);
+                    GameState.SceneCamera.target = Vector2{CameraPosition.X, CameraPosition.Y};
+
                     UpdateEntityPhysicsBodyData(&GameState, Temp);
 
-                    vec2 Magnitude = Floor->Position - Temp->Position;
                     DrawEntity(Temp, RED);
                 }break;
                 default:
                 {
-                    UpdateEntityPhysicsBodyData(&GameState, Temp);
                     DrawEntity(Temp, ORANGE);
                 }break;
             }
