@@ -31,46 +31,48 @@ GetFileSizeInBytes(string Filepath)
     }
     else
     {
+        cl_Error("Failure to find the designated file!\n");
         FileSize = 0;
     }
     return(FileSize);
 }
 
 internal char *
-ReadEntireFile(string Filepath, uint32 *Size, char *Buffer)
+ReadEntireFile(string Filepath, uint32 Size, char *Buffer)
 {
     Check(Filepath.Data != nullptr, "Cannot find the file designated!\n");
     Check(Buffer != nullptr, "Provide a valid buffer!\n");
-    Check(*Size >= 0, "Size is less than 0!\n");
+    Check(Size >= 0, "Size is less than 0!\n");
     
-    *Size = 0;
     FILE *File = fopen((const char *)Filepath.Data, "rb");
-    
-    fseek(File, 0, SEEK_END);
-    *Size = ftell(File);
-    fseek(File, 0, SEEK_SET);
-    
-    memset(Buffer, 0, *Size + 1);
-    fread(Buffer, sizeof(char), *Size, File);
+    if(File)
+    {
+        memset(Buffer, 0, Size + 1);
+        fread(Buffer, sizeof(char), Size, File);
 
-    fclose(File);
+        fclose(File);
+    }
+    else
+    {
+        cl_Error("Failure to find the File!\n");
+    }
     return(Buffer);
 }
 
 internal string
-ReadEntireFileMA(memory_arena *ArenaAllocator, string Filepath, uint32 *FileSize)
+ReadEntireFileMA(memory_arena *ArenaAllocator, string Filepath)
 {
     string File = {};
-    int32 FileSize2 = GetFileSizeInBytes(Filepath);
-    Check(FileSize2 >= 0, "FileSize is less than 0!\n");
+    int32 FileSize = GetFileSizeInBytes(Filepath);
+    Check(FileSize >= 0, "FileSize is less than 0!\n");
     
-    if(FileSize2)
+    if(FileSize)
     {
-        char *Buffer = (char *)PushSize(ArenaAllocator, uint64(FileSize2 + 1));
-        memset(Buffer, 0, FileSize2 + 1);
+        char *Buffer = (char *)PushSize(ArenaAllocator, uint64(FileSize + 1));
+        memset(Buffer, 0, FileSize + 1);
         File.Data = (uint8 *)ReadEntireFile(Filepath, FileSize, Buffer);
-        File.Data[FileSize2 + 1] = 0;
-        File.Length = FileSize2;
+        File.Data[FileSize + 1] = 0;
+        File.Length = FileSize;
     }
     else
     {

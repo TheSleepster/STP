@@ -6,6 +6,8 @@
    ======================================================================== */
 
 #include <raylib.h>
+#include <yyjson.h>
+
 #include "Intrinsics.h"
 
 #include "util/Math.h"
@@ -16,24 +18,28 @@
 #include "util/Sorting.h"
 #include "util/Arena.h"
 
-typedef Sound       sound;
-typedef Color       color;
-typedef Texture2D   texture2D;
-typedef Image       image2D;
-typedef Music       music;
-typedef AudioStream audio_stream;
-typedef Wave        wav_file;
-typedef Sound       sound_data;
+typedef Sound           sound;
+typedef Color           color;
+typedef Texture2D       texture2d;
+typedef Image           image2d;
+typedef Music           music;
+typedef AudioStream     audio_stream;
+typedef Wave            wav_file;
+typedef Sound           sound_data;
+typedef Rectangle       rect;
+typedef Vector2         rlvec2;
+typedef Shader          shader;
+typedef RenderTexture2D stp_framebuffer;
 
 global_variable real32 DeltaTime;
 
 constexpr uint32 MAX_ENTITIES = 1000;
-
 constexpr uint32 IterationCounter = 2;
 constexpr real32 TickRate = 1 / IterationCounter;
-constexpr real32 InAirFriction = 12.0f;
-
+constexpr real32 InAirFriction = 2.0f;
 constexpr real32 EPSILON = 0.04f;
+
+constexpr ivec2 TILE_SIZE = {16, 16};
 
 enum physics_body_type
 {
@@ -44,7 +50,8 @@ enum physics_body_type
 
 enum game_layering
 {
-    LAYER_Player,
+    LAYER_Background = 0,
+    LAYER_Player = 1,
 };
 
 enum entity_flags
@@ -58,6 +65,7 @@ enum entity_arch
 {
     ARCH_Null,
     ARCH_PLAYER,
+    ARCH_TILE,
     ARCH_MAP_WALL,
     ARCH_MAP_FLOOR,
     ARCH_Count
@@ -90,26 +98,44 @@ struct physics_body
     real32 Friction;
 
     bool32 IsGrounded;
+    bool32 IsGravitic;
     bool32 IsColliding;
 
     aabb   CollisionRect;
 };
 
+struct static_sprite_data
+{
+    ivec2 AtlasOffset;
+    ivec2 SpriteSize;
+};
+
+struct animated_sprite_data
+{
+    ivec2  StartingSpriteOffset;
+    ivec2  SpriteSize;
+
+    int32  FrameCount;
+    real32 FrameDuration;
+};
+
 struct entity
 {
     entity_arch  Archetype;
+    
     uint32       Flags;
     uint32       EntityID;
     int32        LayerIndex;
 
     vec2         Position;
-    
     vec2         RenderSize;
     real32       MovementSpeed;
 
     bool32       IsGrounded;
-
     physics_body PhysicsBodyData;
+
+    static_sprite_data StaticSprite;
+    animated_sprite_data AnimatedSprite;
 };
 
 struct collision_data
@@ -131,7 +157,11 @@ struct game_state
     real32       MaxG;
     memory_arena GameArena;
 
+    int32        ActiveTextureCount;
+    texture2d    Textures[32];
+
     entity      *Entities;
+    entity      *EntitySortingBuffer;
 };
 
 internal void
@@ -178,6 +208,8 @@ CreateEntity(game_state *GameState)
     }
     return(Result);
 }
+
+#include "STP_Map.cpp"
 
 internal void
 SetupEntityPlayer(entity *Entity)
@@ -416,7 +448,8 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
             if(MinkowskiBody.Min.X <= 0 && MinkowskiBody.Max.X >= 0 && MinkowskiBody.Min.Y <= 0 && MinkowskiBody.Max.Y >= 0)
             {
                 Body->IsColliding = true;
-
+                Body->Friction = TestBody->Friction;
+                
                 vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
                 Entity->Position += DepthVector;
                 if(DepthVector.X != 0)
@@ -428,10 +461,6 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
                     Body->Velocity.Y = 0;
                 }
             }
-            else
-            {
-                Body->IsColliding = false;
-            }
         }
     }
 }
@@ -442,10 +471,11 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
     physics_body *Body = &Entity->PhysicsBodyData;
     if(Body && Body->BodyType == PB_Dynamic)
     {
-        if(!Entity->IsGrounded)
+        if(((Entity->Flags & IS_GRAVITIC) != 0) && !Entity->IsGrounded)
         {
-            Body->Friction = InAirFriction; 
+            Body->Velocity.Y = 1.0f * (GameState->Gravity);
         }
+        
         Body->Acceleration *= Entity->MovementSpeed;
         Body->Acceleration += -Body->Velocity * Body->Friction;
 
@@ -481,13 +511,25 @@ AdjustStaticObjectPosition(entity *Entity, vec2 Position)
     Body->CollisionRect.Max = Body->CollisionRect.Position + Body->CollisionRect.HalfSize;
 }
 
+internal inline texture2d
+STPLoadTexture(string Filepath)
+{
+    texture2d Result = {};
+    
+    image2d Image = LoadImage(CSTR(Filepath));
+    ImageFlipVertical(&Image);
+
+    Result = LoadTextureFromImage(Image);
+    return(Result);
+}
+
 int 
 main()
 {
     game_state  GameState = {};
 
     GameState.WindowSizeData = {1920, 1080};
-    GameState.Gravity = -4;
+    GameState.Gravity = -120;
     GameState.MaxG = -400;
     
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -505,7 +547,8 @@ main()
         GameMemory.TransientStorage.BlockOffset = (uint8 *)GameMemory.PermanentStorage.MemoryBlock;
 
         InitializeArena(&GameState.GameArena, Megabytes(50), &GameMemory.PermanentStorage);
-        GameState.Entities = PushArray(&GameState.GameArena, entity, MAX_ENTITIES);
+        GameState.Entities            = PushArray(&GameState.GameArena, entity, MAX_ENTITIES);
+        GameState.EntitySortingBuffer = PushArray(&GameState.GameArena, entity, MAX_ENTITIES);
     }
     
     entity *Player = CreateEntity(&GameState);
@@ -523,6 +566,9 @@ main()
     entity *Wall2 = CreateEntity(&GameState);
     SetupEntityWallTile(Wall2);
     AdjustStaticObjectPosition(Wall2, vec2{-400, 0});
+
+    GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/Dungeon/Assets/Assets.png");
+    stp_level_data *LevelData = LoadOGMOLevel(&GameState);
 
     real32 Accumulator = 0;
     while(!WindowShouldClose())
@@ -553,6 +599,7 @@ main()
         BeginDrawing();
         BeginMode2D(GameState.SceneCamera);
 
+        RadixSort((void *)GameState.Entities, (void *)GameState.EntitySortingBuffer, MAX_ENTITIES, sizeof(entity), offsetof(entity, LayerIndex), 21);
         for(uint32 EntityIndex = 0;
             EntityIndex < MAX_ENTITIES;
             ++EntityIndex)
@@ -569,8 +616,27 @@ main()
                     GameState.SceneCamera.target = Vector2{CameraPosition.X, CameraPosition.Y};
 
                     UpdateEntityPhysicsBodyData(&GameState, Temp);
-
                     DrawEntity(Temp, RED);
+                }break;
+                case ARCH_TILE:
+                {
+                    rect TextureSourceRect =
+                    {
+                        real32(Temp->StaticSprite.AtlasOffset.X),
+                        real32(Temp->StaticSprite.AtlasOffset.Y),
+                        real32(Temp->StaticSprite.SpriteSize.X) * -1.0f,
+                        real32(Temp->StaticSprite.SpriteSize.Y) * -1.0f
+                    };
+
+                    rect SpriteDestRect =
+                    {
+                        real32(Temp->Position.X - int32(Temp->StaticSprite.SpriteSize.X * 0.5f)),
+                        real32(Temp->Position.Y - int32(Temp->StaticSprite.SpriteSize.Y * 0.5f)),
+                        real32(Temp->StaticSprite.SpriteSize.X),
+                        real32(Temp->StaticSprite.SpriteSize.Y)
+                    };
+
+                    DrawTexturePro(GameState.Textures[0], TextureSourceRect, SpriteDestRect, rlvec2{0}, 0.0f, WHITE);
                 }break;
                 default:
                 {
