@@ -33,7 +33,7 @@ typedef RenderTexture2D stp_framebuffer;
 
 global_variable real32 DeltaTime;
 
-constexpr uint32 MAX_ENTITIES      = 1000;
+constexpr uint32 MAX_ENTITIES      = 10000;
 constexpr uint32 IterationCounter  = 2;
 constexpr real32 TickRate          = 1 / IterationCounter;
 constexpr real32 InAirFriction     = 2.0f;
@@ -43,6 +43,11 @@ constexpr uint32 GAME_WORLD_WIDTH  = 640;
 constexpr uint32 GAME_WORLD_HEIGHT = 360;
 
 constexpr ivec2 TILE_SIZE = {16, 16};
+
+struct entity;
+#define ENTITY_ON_COLLIDE_RESPONSE(name) void name(entity *A, entity *B)
+typedef ENTITY_ON_COLLIDE_RESPONSE(entity_on_collide);
+
 
 enum physics_body_type
 {
@@ -96,9 +101,9 @@ struct physics_body
 {
     int32  BodyType;
     
-    vec2   Velocity;
-    vec2   Acceleration;
-    real32 Friction;
+    vec2  Velocity;
+    vec2  Acceleration;
+    vec2  Friction;
 
     bool32 IsGrounded;
     bool32 IsGravitic;
@@ -122,6 +127,15 @@ struct animated_sprite_data
     real32 FrameDuration;
 };
 
+struct timer
+{
+    real32 StartTime;
+    real32 EndTime;
+    
+    real32 TimeElapsed;
+    real32 TimerDuration;
+};
+
 struct entity
 {
     entity_arch  Archetype;
@@ -135,10 +149,19 @@ struct entity
     real32       MovementSpeed;
 
     bool32       IsGrounded;
+    bool32       IsJumping;
+
+    int32        MaxJumps;
+    int32        JumpCounter;
+    
+    timer        JumpTimer;
+    
     physics_body PhysicsBodyData;
 
     static_sprite_data StaticSprite;
     animated_sprite_data AnimatedSprite;
+
+    entity_on_collide *OnCollide;
 };
 
 struct collision_data
@@ -170,16 +193,13 @@ struct game_state
 internal void
 ProcessMovement(entity *Player)
 {
-    if(IsKeyDown(KEY_W))
+    if(IsKeyDown(KEY_SPACE) && Player->IsGrounded)
     {
-        Player->PhysicsBodyData.Acceleration.Y =  1.0f;
+        Player->IsGrounded = false;
+        Player->IsJumping  = true;
+        Player->JumpCounter--;
     }
-
-    if(IsKeyDown(KEY_S))
-    {
-        Player->PhysicsBodyData.Acceleration.Y = -1.0f;
-    }
-
+    
     if(IsKeyDown(KEY_A))
     {
         Player->PhysicsBodyData.Acceleration.X =  1.0f;
@@ -222,6 +242,10 @@ SetupEntityPlayer(entity *Entity)
     Entity->RenderSize    = {16, 16};
     Entity->LayerIndex    = LAYER_Player;
 
+    Entity->JumpTimer.TimerDuration = 0.15f;
+    Entity->MaxJumps = 1;
+    Entity->JumpCounter = 1;
+
     Entity->Flags |= IS_GRAVITIC;
 
     Entity->PhysicsBodyData.BodyType = PB_Dynamic;
@@ -237,7 +261,7 @@ SetupEntityFloorTile(entity *Entity)
 
     Entity->PhysicsBodyData.BodyType = PB_Static;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
-    Entity->PhysicsBodyData.Friction = 12.0f;
+    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 }
 
 internal void
@@ -249,7 +273,6 @@ SetupEntityWallTile(entity *Entity)
 
     Entity->PhysicsBodyData.BodyType = PB_Static;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
-    Entity->PhysicsBodyData.Friction = 12.0f;
 }
 
 internal void
@@ -435,9 +458,10 @@ SweepEntitiesForCollision(game_state *GameState, entity *Entity, vec2 ScaledVelo
     return(CollisionData);
 }
 
-internal void 
+internal collision_data 
 EntityCollisionResponse(game_state *GameState, entity *Entity)
 {
+    collision_data Result = {};
     physics_body *Body = &Entity->PhysicsBodyData;
     for(uint32 EntityIndex = 0;
         EntityIndex < MAX_ENTITIES;
@@ -448,12 +472,24 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
         {
             physics_body *TestBody = &TestEntity->PhysicsBodyData;
             aabb MinkowskiBody = CalculateMinkowskiDifference(TestBody->CollisionRect, Body->CollisionRect);
+            
+            // TODO(Sleepster): Might want to change this to support a variety of resolutions
             if(MinkowskiBody.Min.X <= 0 && MinkowskiBody.Max.X >= 0 && MinkowskiBody.Min.Y <= 0 && MinkowskiBody.Max.Y >= 0)
             {
-                Body->IsColliding = true;
-                Body->Friction = TestBody->Friction;
+                Result.Collision = true;
+                Result.CollidedEntity = TestEntity;
                 
+                Body->Friction = TestBody->Friction;
                 vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
+                if(DepthVector.Y <= EPSILON && DepthVector.Y > 0)
+                {
+                    Entity->IsGrounded = true;
+                }
+                else
+                {
+                    Entity->IsGrounded = false;
+                }
+
                 if(DepthVector.X != 0)
                 {
                     Entity->Position.X += DepthVector.X;
@@ -464,9 +500,17 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
                     Entity->Position.Y += DepthVector.Y;
                     Body->Velocity.Y = 0;
                 }
+
+                break;
+            }
+            else if((MinkowskiBody.Max.Y - MinkowskiBody.Min.Y) > (EPSILON))
+            {
+                Entity->IsGrounded = false;
+                Body->Friction.Y = InAirFriction;
             }
         }
     }
+    return(Result);
 }
 
 internal void
@@ -477,15 +521,32 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
     {
         if(((Entity->Flags & IS_GRAVITIC) != 0) && !Entity->IsGrounded)
         {
-            Body->Velocity.Y = 1.0f * (GameState->Gravity);
+            Body->Velocity.Y += (GameState->Gravity * DeltaTime);
         }
         
         Body->Acceleration *= Entity->MovementSpeed;
         Body->Acceleration += -Body->Velocity * Body->Friction;
 
         vec2 OldEntityV   = Body->Velocity;
-        Entity->Position  = 0.5f * Body->Acceleration * (DeltaTime * DeltaTime) + (Body->Velocity * DeltaTime) + Entity->Position;
-        Body->Velocity    = (Body->Acceleration * DeltaTime) + OldEntityV;
+        if(Entity->IsJumping)
+        {
+            Body->Friction.Y = InAirFriction;
+            
+            Entity->JumpTimer.TimeElapsed += DeltaTime;
+            if(Entity->JumpTimer.TimeElapsed >= Entity->JumpTimer.TimerDuration)
+            {
+                Entity->JumpTimer.TimeElapsed = 0.0f;
+                Entity->IsJumping = false;
+                Entity->JumpCounter = Entity->MaxJumps;
+            }
+            else
+            {
+                Body->Velocity.Y = 250.0f;
+            }
+        }
+
+        Entity->Position  += Body->Velocity * DeltaTime;
+        Body->Velocity    += (Body->Acceleration * DeltaTime);
 
         Body->CollisionRect.Position = Entity->Position;
         Body->CollisionRect.Min = Body->CollisionRect.Position - Body->CollisionRect.HalfSize;
@@ -494,12 +555,21 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
 
         vec2 ScaledVelocity = v2Scale(Body->Velocity, DeltaTime * TickRate);
 
+        collision_data IsColliding = {};
         for(uint32 IterationIndex = 0;
             IterationIndex < IterationCounter;
             ++IterationIndex)
         {
             SweepEntitiesForCollision(GameState, Entity, ScaledVelocity);
-            EntityCollisionResponse(GameState, Entity);
+            IsColliding = EntityCollisionResponse(GameState, Entity);
+        }
+
+        if(IsColliding.Collision)
+        {
+            if(IsColliding.CollidedEntity && IsColliding.CollidedEntity->OnCollide)
+            {
+                IsColliding.CollidedEntity->OnCollide(Entity, IsColliding.CollidedEntity);
+            }
         }
     }
 }
@@ -533,7 +603,7 @@ main()
     game_state  GameState = {};
 
     GameState.WindowSizeData = {1920, 1080};
-    GameState.Gravity = -10;
+    GameState.Gravity = -500;
     GameState.MaxG = -400;
     
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -612,6 +682,7 @@ main()
 
                     UpdateEntityPhysicsBodyData(&GameState, Temp);
                     DrawEntity(Temp, RED);
+
                 }break;
                 case ARCH_TILE:
                 {
@@ -639,6 +710,7 @@ main()
                 }break;
             }
         }
+
         EndMode2D();
         EndDrawing();
     }

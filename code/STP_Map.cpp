@@ -81,7 +81,7 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                     Entity->Position = v2Cast(TileWorldPosition);
                     Entity->StaticSprite = {.AtlasOffset = TileUVData, .SpriteSize = TILE_SIZE};
                     Entity->LayerIndex = int32(LayerCounter--);
-                    Entity->PhysicsBodyData.Friction = 12.0f;
+                    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 
                     if(LevelData->CollisionLayerData)
                     {
