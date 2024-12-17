@@ -33,11 +33,14 @@ typedef RenderTexture2D stp_framebuffer;
 
 global_variable real32 DeltaTime;
 
-constexpr uint32 MAX_ENTITIES = 1000;
-constexpr uint32 IterationCounter = 2;
-constexpr real32 TickRate = 1 / IterationCounter;
-constexpr real32 InAirFriction = 2.0f;
-constexpr real32 EPSILON = 0.04f;
+constexpr uint32 MAX_ENTITIES      = 1000;
+constexpr uint32 IterationCounter  = 2;
+constexpr real32 TickRate          = 1 / IterationCounter;
+constexpr real32 InAirFriction     = 2.0f;
+constexpr real32 EPSILON           = 0.2f;
+
+constexpr uint32 GAME_WORLD_WIDTH  = 640;
+constexpr uint32 GAME_WORLD_HEIGHT = 360;
 
 constexpr ivec2 TILE_SIZE = {16, 16};
 
@@ -51,7 +54,7 @@ enum physics_body_type
 enum game_layering
 {
     LAYER_Background = 0,
-    LAYER_Player = 1,
+    LAYER_Player = 10,
 };
 
 enum entity_flags
@@ -215,8 +218,8 @@ internal void
 SetupEntityPlayer(entity *Entity)
 {
     Entity->Archetype     = ARCH_PLAYER;
-    Entity->MovementSpeed = 6000;
-    Entity->RenderSize    = {32, 32};
+    Entity->MovementSpeed = 3000;
+    Entity->RenderSize    = {16, 16};
     Entity->LayerIndex    = LAYER_Player;
 
     Entity->Flags |= IS_GRAVITIC;
@@ -451,13 +454,14 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
                 Body->Friction = TestBody->Friction;
                 
                 vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
-                Entity->Position += DepthVector;
                 if(DepthVector.X != 0)
                 {
+                    Entity->Position.X += DepthVector.X;
                     Body->Velocity.X = 0;
                 }
                 else if(DepthVector.Y != 0)
                 {
+                    Entity->Position.Y += DepthVector.Y;
                     Body->Velocity.Y = 0;
                 }
             }
@@ -529,7 +533,7 @@ main()
     game_state  GameState = {};
 
     GameState.WindowSizeData = {1920, 1080};
-    GameState.Gravity = -120;
+    GameState.Gravity = -10;
     GameState.MaxG = -400;
     
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
@@ -553,22 +557,10 @@ main()
     
     entity *Player = CreateEntity(&GameState);
     SetupEntityPlayer(Player);
-    Player->Position.Y = 32;
-
-    entity *Floor = CreateEntity(&GameState);
-    SetupEntityFloorTile(Floor);
-    AdjustStaticObjectPosition(Floor, vec2{0, 0});
-
-    entity *Wall = CreateEntity(&GameState);
-    SetupEntityWallTile(Wall);
-    AdjustStaticObjectPosition(Wall, vec2{400, 0});
-
-    entity *Wall2 = CreateEntity(&GameState);
-    SetupEntityWallTile(Wall2);
-    AdjustStaticObjectPosition(Wall2, vec2{-400, 0});
+    Player->Position.Y = 42;
 
     GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/Dungeon/Assets/Assets.png");
-    stp_level_data *LevelData = LoadOGMOLevel(&GameState);
+    stp_level_data *LevelData = LoadOGMOLevel(&GameState, ivec2{-150, 210});
 
     real32 Accumulator = 0;
     while(!WindowShouldClose())
@@ -580,7 +572,10 @@ main()
         GameState.SceneCamera.offset = {real32(GameState.WindowSizeData.X * 0.5f), (real32)(GameState.WindowSizeData.Y * 0.5f)};
         // NOTE(Sleepster): Raylib by default is flipped, meaning a change in the Positive Y direction yields a downward movement.
         // This fixes that but it might introduce some bugs down the line so I'm just putting this here
-        GameState.SceneCamera.zoom   = -2.0f;
+
+        real32 ZoomX = real32(real32(GameState.WindowSizeData.X) / real32(GAME_WORLD_WIDTH));
+        real32 ZoomY = real32(real32(GameState.WindowSizeData.Y) / real32(GAME_WORLD_HEIGHT));
+        GameState.SceneCamera.zoom   = -1.0f * fmaxf(ZoomX, ZoomY);
 
         Vector2 RaylibMousePos = GetMousePosition();
         Vector2 RaylibWorldToScreenMousePos = GetScreenToWorld2D(RaylibMousePos, GameState.SceneCamera);
@@ -595,10 +590,10 @@ main()
             Accumulator = 0;
         }
 
-        ClearBackground(DARKGRAY);
         BeginDrawing();
-        BeginMode2D(GameState.SceneCamera);
+        ClearBackground(DARKGRAY);
 
+        BeginMode2D(GameState.SceneCamera);
         RadixSort((void *)GameState.Entities, (void *)GameState.EntitySortingBuffer, MAX_ENTITIES, sizeof(entity), offsetof(entity, LayerIndex), 21);
         for(uint32 EntityIndex = 0;
             EntityIndex < MAX_ENTITIES;
@@ -644,7 +639,6 @@ main()
                 }break;
             }
         }
-
         EndMode2D();
         EndDrawing();
     }

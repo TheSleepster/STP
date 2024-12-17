@@ -35,6 +35,9 @@ struct stp_level_data
     size_t LevelTilemapCount;
     string *Tilesets;
 
+    size_t  CollisionLayerIndexCount;
+    bool32 *CollisionLayerData;
+
     size_t LevelLayerCount;
     stp_level_layer_data *Layers;
 };
@@ -42,8 +45,7 @@ struct stp_level_data
 internal stp_level_data*
 ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
 {
-    int32 Layer = 4;
-    
+    size_t LayerCounter = LevelData->LevelLayerCount;
     for(uint32 LayerIndex = 0;
         LayerIndex < LevelData->LevelLayerCount;
         ++LayerIndex)
@@ -59,7 +61,6 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                 TileIndex < CurrentWorkingLayer->TilemapTileCount;
                 ++TileIndex)
             {
-                Layer--;
                 int32 TileID = CurrentWorkingLayer->TilemapTileIndices[TileIndex];
                 if(TileID != -1)
                 {
@@ -71,15 +72,26 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
 
                     ivec2 TileWorldPosition =
                     {
-                         TilemapWidthInTiles - 1 - (TileIndex % CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.X,
-                         TilemapHeightInTiles  - 1 - (TileIndex / CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.Y
+                        (TilemapWidthInTiles - 1 - (TileIndex % CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.X)   - LevelData->LevelOffsetX,
+                        (TilemapHeightInTiles  - 1 - (TileIndex / CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.Y) + LevelData->LevelOffsetY,
                     };
 
                     entity *Entity = CreateEntity(GameState);
                     Entity->Archetype = ARCH_TILE;
                     Entity->Position = v2Cast(TileWorldPosition);
                     Entity->StaticSprite = {.AtlasOffset = TileUVData, .SpriteSize = TILE_SIZE};
-                    Entity->LayerIndex = Layer;
+                    Entity->LayerIndex = int32(LayerCounter--);
+                    Entity->PhysicsBodyData.Friction = 12.0f;
+
+                    if(LevelData->CollisionLayerData)
+                    {
+                        if(LevelData->CollisionLayerData[TileIndex] != 0)
+                        {
+                            Entity->PhysicsBodyData.BodyType = PB_Static;
+                            Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
+                            Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
+                        }
+                    }
                 }
                 else continue;
             }
@@ -90,7 +102,7 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
 }
 
 internal stp_level_data*
-LoadOGMOLevel(game_state *GameState)
+LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
 {
     stp_level_data *Result = PushStruct(&GameState->GameArena, stp_level_data);
     
@@ -105,8 +117,9 @@ LoadOGMOLevel(game_state *GameState)
             {
                 Result->LevelWidth   = JSON_get_int(JSON_obj_get(JSONRoot, "width"));
                 Result->LevelHeight  = JSON_get_int(JSON_obj_get(JSONRoot, "height"));
-                Result->LevelOffsetX = JSON_get_int(JSON_obj_get(JSONRoot, "offsetX"));
-                Result->LevelOffsetY = JSON_get_int(JSON_obj_get(JSONRoot, "offsetY"));
+
+                Result->LevelOffsetX = MapOffset.X;
+                Result->LevelOffsetY = MapOffset.Y;
 
                 JSON_val *LevelTilemapLayers = JSON_obj_get(JSONRoot, "layers");
                 Result->LevelLayerCount = JSON_arr_size(LevelTilemapLayers);
@@ -145,6 +158,30 @@ LoadOGMOLevel(game_state *GameState)
                         JSON_arr_foreach(TilemapArray, TileIndex, MaxTileIndex, TileValue)
                         {
                             WorkingLayer->TilemapTileIndices[Index++] = JSON_get_int(TileValue);
+                        }
+                    }
+
+                    const char *LayerName = JSON_get_str(JSON_obj_get(Value, "name"));
+                    if(LayerName && (strcmp(LayerName, "collision_layer") == 0))
+                    {
+                        JSON_val *CollisionGrid = JSON_obj_get(Value, "grid");
+                        if(CollisionGrid)
+                        {
+                            Result->CollisionLayerIndexCount = JSON_arr_size(CollisionGrid);
+                            Result->CollisionLayerData       = PushArray(&GameState->GameArena, bool32, Result->CollisionLayerIndexCount);
+
+                            size_t TileIndex = 0;
+                            size_t MaxTileIndex = 0;
+                            JSON_val *TileValue;
+
+                            int32 Index = 0;
+                            JSON_arr_foreach(CollisionGrid, TileIndex, MaxTileIndex, TileValue)
+                            {
+                                const char *TileColliderStringValue = JSON_get_str(TileValue);
+                                int32 TileColliderValue = atoi(TileColliderStringValue);
+                                
+                                Result->CollisionLayerData[Index++] = (TileColliderValue != 0);
+                            }
                         }
                     }
                 }
