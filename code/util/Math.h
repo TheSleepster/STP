@@ -205,6 +205,7 @@
 #define ABS(a) ((a) > 0 ? (a) : -(a))
 #define Modulous(a, m) (((a) % (m)) >= 0 ? ((a) % (m)) : (((a) % (m)) + (m)))
 #define Square(x) ((x) * (x))
+#define Sign(x)   ((x >= 0) ? 1 : -1)
 
 typedef union vec2
 {

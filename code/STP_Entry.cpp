@@ -29,14 +29,14 @@ typedef Sound           sound_data;
 typedef Rectangle       rect;
 typedef Vector2         rlvec2;
 typedef Shader          shader;
-typedef RenderTexture2D stp_framebuffer;
 
 global_variable real32 DeltaTime;
 
 constexpr uint32 MAX_ENTITIES      = 10000;
 constexpr uint32 IterationCounter  = 2;
 constexpr real32 TickRate          = 1 / IterationCounter;
-constexpr real32 InAirFriction     = 2.0f;
+constexpr real32 InAirFrictionY    = 2.0f;
+constexpr real32 InAirFrictionX    = 24.0f;
 constexpr real32 EPSILON           = 0.2f;
 
 constexpr uint32 GAME_WORLD_WIDTH  = 640;
@@ -48,12 +48,12 @@ struct entity;
 #define ENTITY_ON_COLLIDE_RESPONSE(name) void name(entity *A, entity *B)
 typedef ENTITY_ON_COLLIDE_RESPONSE(entity_on_collide);
 
-
+// NOTE(Sleepster): Similar to Celeste, Actors will respond with collisions while Solids will move no matter what
 enum physics_body_type
 {
     PB_Null,
-    PB_Dynamic,
-    PB_Static,
+    PB_Actor,
+    PB_Solid,
 };
 
 enum game_layering
@@ -150,11 +150,17 @@ struct entity
 
     bool32       IsGrounded;
     bool32       IsJumping;
+    bool32       IsDashing;
 
     int32        MaxJumps;
     int32        JumpCounter;
+
+    int32        MaxDashes;
+    int32        DashCounter;
     
     timer        JumpTimer;
+    timer        DashTimer;
+    timer        CoyoteTimer;
     
     physics_body PhysicsBodyData;
 
@@ -175,7 +181,7 @@ struct collision_data
     entity *CollidedEntity;
 };
 
-struct game_state
+ struct game_state
 {
     ivec2        WindowSizeData;
     Camera2D     SceneCamera;
@@ -193,11 +199,19 @@ struct game_state
 internal void
 ProcessMovement(entity *Player)
 {
-    if(IsKeyDown(KEY_SPACE) && Player->IsGrounded)
+    if(IsKeyDown(KEY_SPACE) && Player->IsGrounded && Player->JumpCounter < Player->MaxJumps)
     {
         Player->IsGrounded = false;
         Player->IsJumping  = true;
-        Player->JumpCounter--;
+        Player->JumpCounter++;
+    }
+
+    if(IsKeyPressed(KEY_LEFT_SHIFT) &&
+       !Player->IsGrounded &&
+       fabsf(Player->PhysicsBodyData.Velocity.Y) > 12)
+    {
+        Player->IsDashing  = true;
+        Player->DashCounter++;
     }
     
     if(IsKeyDown(KEY_A))
@@ -242,13 +256,19 @@ SetupEntityPlayer(entity *Entity)
     Entity->RenderSize    = {16, 16};
     Entity->LayerIndex    = LAYER_Player;
 
-    Entity->JumpTimer.TimerDuration = 0.15f;
+    Entity->JumpTimer.TimerDuration   = 0.15f;
+    Entity->DashTimer.TimerDuration   = 0.08f;
+    Entity->CoyoteTimer.TimerDuration = 0.15f;
+
     Entity->MaxJumps = 1;
-    Entity->JumpCounter = 1;
+    Entity->JumpCounter = 0;
+
+    Entity->MaxDashes = 1;
+    Entity->DashCounter = 0;
 
     Entity->Flags |= IS_GRAVITIC;
 
-    Entity->PhysicsBodyData.BodyType = PB_Dynamic;
+    Entity->PhysicsBodyData.BodyType = PB_Actor;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
 }
 
@@ -259,7 +279,7 @@ SetupEntityFloorTile(entity *Entity)
     Entity->RenderSize = {400, 10};
     Entity->LayerIndex    = LAYER_Player;
 
-    Entity->PhysicsBodyData.BodyType = PB_Static;
+    Entity->PhysicsBodyData.BodyType = PB_Solid;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
     Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 }
@@ -271,7 +291,7 @@ SetupEntityWallTile(entity *Entity)
     Entity->RenderSize = {10, 400};
     Entity->LayerIndex = LAYER_Player;
 
-    Entity->PhysicsBodyData.BodyType = PB_Static;
+    Entity->PhysicsBodyData.BodyType = PB_Solid;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
 }
 
@@ -481,13 +501,10 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
                 
                 Body->Friction = TestBody->Friction;
                 vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
-                if(DepthVector.Y <= EPSILON && DepthVector.Y > 0)
+                Result.Depth = DepthVector;
+                if(fabsf(DepthVector.Y) >= EPSILON * 2.0f)
                 {
                     Entity->IsGrounded = true;
-                }
-                else
-                {
-                    Entity->IsGrounded = false;
                 }
 
                 if(DepthVector.X != 0)
@@ -500,44 +517,54 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
                     Entity->Position.Y += DepthVector.Y;
                     Body->Velocity.Y = 0;
                 }
-
                 break;
             }
-            else if((MinkowskiBody.Max.Y - MinkowskiBody.Min.Y) > (EPSILON))
+            else if((MinkowskiBody.Max.Y - MinkowskiBody.Min.Y) > (EPSILON * 4))
             {
                 Entity->IsGrounded = false;
-                Body->Friction.Y = InAirFriction;
+                Body->Friction.Y = InAirFrictionY;
+                Body->Friction.X = InAirFrictionX;
             }
         }
     }
     return(Result);
 }
 
+// TODO(Sleepster): Maybe make this "UpdatePlayerPhysicsBodyData"
 internal void
 UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
 {
     physics_body *Body = &Entity->PhysicsBodyData;
-    if(Body && Body->BodyType == PB_Dynamic)
+    if(Body && Body->BodyType == PB_Actor)
     {
         if(((Entity->Flags & IS_GRAVITIC) != 0) && !Entity->IsGrounded)
         {
             Body->Velocity.Y += (GameState->Gravity * DeltaTime);
+            if(Entity->CoyoteTimer.TimeElapsed < Entity->CoyoteTimer.TimerDuration)
+            {
+                Entity->CoyoteTimer.TimeElapsed += DeltaTime;
+            }
+        }
+        else if(((Entity->Flags & IS_GRAVITIC) != 0) && Entity->IsGrounded)
+        {
+            Entity->CoyoteTimer.TimeElapsed = 0.0f;
         }
         
         Body->Acceleration *= Entity->MovementSpeed;
         Body->Acceleration += -Body->Velocity * Body->Friction;
-
         vec2 OldEntityV   = Body->Velocity;
+
+        // NOTE(Sleepster): JUMPING 
         if(Entity->IsJumping)
         {
-            Body->Friction.Y = InAirFriction;
+            Body->Friction.Y = InAirFrictionY;
+            Body->Friction.X = InAirFrictionX;
             
             Entity->JumpTimer.TimeElapsed += DeltaTime;
             if(Entity->JumpTimer.TimeElapsed >= Entity->JumpTimer.TimerDuration)
             {
                 Entity->JumpTimer.TimeElapsed = 0.0f;
                 Entity->IsJumping = false;
-                Entity->JumpCounter = Entity->MaxJumps;
             }
             else
             {
@@ -545,8 +572,43 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
             }
         }
 
-        Entity->Position  += Body->Velocity * DeltaTime;
+        // NOTE(Sleepster): COYOTE TIMING
+        if(IsKeyDown(KEY_SPACE) && Entity->JumpCounter < Entity->MaxJumps)
+        {
+            bool CanJumpViaCoyote = (Entity->CoyoteTimer.TimeElapsed < Entity->CoyoteTimer.TimerDuration);
+            bool CanJumpNormally  = Entity->IsGrounded;
+
+            if(CanJumpViaCoyote || CanJumpNormally)
+            {
+                Entity->IsGrounded = false;
+                Entity->IsJumping = true;
+                Entity->JumpCounter++;
+        
+                Entity->CoyoteTimer.TimeElapsed = Entity->CoyoteTimer.TimerDuration; 
+            }
+        }
+
+        // NOTE(Sleepster): DASHING
+        if(Entity->IsDashing &&
+           !Entity->IsGrounded &&
+           fabsf(Body->Acceleration.X) > 0.0f &&
+           Entity->DashCounter <= Entity->MaxDashes)
+        {
+            Body->Velocity.Y = 0.0f;
+            Entity->DashTimer.TimeElapsed += DeltaTime;
+            if(Entity->DashTimer.TimeElapsed >= Entity->DashTimer.TimerDuration)
+            {
+                Entity->DashTimer.TimeElapsed = 0.0f;
+                Entity->IsDashing = false;
+            }
+            else
+            {
+                Body->Velocity.X += 50.0f * Sign(Body->Velocity.X);
+            }
+        }
+
         Body->Velocity    += (Body->Acceleration * DeltaTime);
+        Entity->Position  += Body->Velocity * DeltaTime;
 
         Body->CollisionRect.Position = Entity->Position;
         Body->CollisionRect.Min = Body->CollisionRect.Position - Body->CollisionRect.HalfSize;
@@ -566,9 +628,21 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
 
         if(IsColliding.Collision)
         {
-            if(IsColliding.CollidedEntity && IsColliding.CollidedEntity->OnCollide)
+            if(IsColliding.CollidedEntity)
             {
-                IsColliding.CollidedEntity->OnCollide(Entity, IsColliding.CollidedEntity);
+                if(IsColliding.CollidedEntity->Archetype == ARCH_TILE &&
+                   fabsf(IsColliding.Depth.X) == 0.0f)
+                {
+                    Entity->DashCounter = 0;
+                    Entity->JumpCounter = 0;
+                    Entity->IsDashing = false;
+                    Entity->IsGrounded = true;
+                }
+                
+                if(IsColliding.CollidedEntity->OnCollide)
+                {
+                    IsColliding.CollidedEntity->OnCollide(Entity, IsColliding.CollidedEntity);
+                }
             }
         }
     }
@@ -630,7 +704,7 @@ main()
     Player->Position.Y = 42;
 
     GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/Dungeon/Assets/Assets.png");
-    stp_level_data *LevelData = LoadOGMOLevel(&GameState, ivec2{-150, 210});
+    LoadOGMOLevel(&GameState, ivec2{-150, 210});
 
     real32 Accumulator = 0;
     while(!WindowShouldClose())

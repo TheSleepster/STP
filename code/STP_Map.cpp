@@ -87,7 +87,7 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                     {
                         if(LevelData->CollisionLayerData[TileIndex] != 0)
                         {
-                            Entity->PhysicsBodyData.BodyType = PB_Static;
+                            Entity->PhysicsBodyData.BodyType = PB_Solid;
                             Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
                             Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
                         }
