@@ -59,13 +59,14 @@ enum physics_body_type
 enum game_layering
 {
     LAYER_Background = 0,
-    LAYER_Player = 10,
+    LAYER_Player = 0,
 };
 
 enum entity_flags
 {
     IS_VALID    = 1 << 0,
     IS_GRAVITIC = 1 << 1,
+    IS_PICKUP   = 1 << 2,
     FlagCount
 };
 
@@ -73,6 +74,7 @@ enum entity_arch
 {
     ARCH_Null,
     ARCH_PLAYER,
+    ARCH_STROBBY,
     ARCH_TILE,
     ARCH_MAP_WALL,
     ARCH_MAP_FLOOR,
@@ -225,6 +227,12 @@ ProcessMovement(entity *Player)
     }
 }
 
+internal void
+DeleteEntity(entity *Entity)
+{
+    memset(Entity, 0, sizeof(entity));
+}
+
 internal entity *
 CreateEntity(game_state *GameState)
 {
@@ -245,8 +253,6 @@ CreateEntity(game_state *GameState)
     }
     return(Result);
 }
-
-#include "STP_Map.cpp"
 
 internal void
 SetupEntityPlayer(entity *Entity)
@@ -296,6 +302,20 @@ SetupEntityWallTile(entity *Entity)
 }
 
 internal void
+SetupEntityStrobby(entity *Entity)
+{
+    Entity->Archetype  = ARCH_STROBBY;
+    Entity->RenderSize = {16, 16};
+    Entity->LayerIndex = LAYER_Player;
+
+    Entity->PhysicsBodyData.BodyType = PB_Solid;
+    Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
+    Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
+     
+    Entity->Flags |= IS_PICKUP;
+}
+
+internal void
 DrawEntity(entity *Entity, Color DrawColor)
 {
     DrawRectangle((int)Entity->Position.X - int(Entity->RenderSize.X * 0.5f),
@@ -304,6 +324,8 @@ DrawEntity(entity *Entity, Color DrawColor)
                   (int)Entity->RenderSize.Y,
                   DrawColor);
 }
+
+#include "STP_Map.cpp"
 
 internal vec2 
 CalculateCollisionDepth(aabb TestBox)
@@ -559,6 +581,10 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
         {
             Body->Friction.Y = InAirFrictionY;
             Body->Friction.X = InAirFrictionX;
+            if(IsKeyReleased(KEY_SPACE))
+            {
+                Entity->IsJumping = false;
+            }
             
             Entity->JumpTimer.TimeElapsed += DeltaTime;
             if(Entity->JumpTimer.TimeElapsed >= Entity->JumpTimer.TimerDuration)
@@ -575,13 +601,13 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
         // NOTE(Sleepster): COYOTE TIMING
         if(IsKeyDown(KEY_SPACE) && Entity->JumpCounter < Entity->MaxJumps)
         {
-            bool CanJumpViaCoyote = (Entity->CoyoteTimer.TimeElapsed < Entity->CoyoteTimer.TimerDuration);
-            bool CanJumpNormally  = Entity->IsGrounded;
+            bool CanCoyoteJump   = (Entity->CoyoteTimer.TimeElapsed < Entity->CoyoteTimer.TimerDuration);
+            bool CanJumpNormally = Entity->IsGrounded;
 
-            if(CanJumpViaCoyote || CanJumpNormally)
+            if(CanCoyoteJump || CanJumpNormally)
             {
                 Entity->IsGrounded = false;
-                Entity->IsJumping = true;
+                Entity->IsJumping  = true;
                 Entity->JumpCounter++;
         
                 Entity->CoyoteTimer.TimeElapsed = Entity->CoyoteTimer.TimerDuration; 
@@ -639,7 +665,7 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
                     Entity->IsGrounded = true;
                 }
                 
-                if(IsColliding.CollidedEntity->OnCollide)
+                if(IsColliding.CollidedEntity->OnCollide != 0)
                 {
                     IsColliding.CollidedEntity->OnCollide(Entity, IsColliding.CollidedEntity);
                 }
@@ -734,6 +760,13 @@ main()
             Accumulator = 0;
         }
 
+        if(IsKeyPressed(KEY_Y))
+        {
+            Player = CreateEntity(&GameState);
+            SetupEntityPlayer(Player);
+            Player->Position.Y = 42;
+        }
+
         BeginDrawing();
         ClearBackground(DARKGRAY);
 
@@ -778,6 +811,10 @@ main()
 
                     DrawTexturePro(GameState.Textures[0], TextureSourceRect, SpriteDestRect, rlvec2{0}, 0.0f, WHITE);
                 }break;
+                case ARCH_STROBBY:
+                {
+                    DrawEntity(Temp, ORANGE);
+                };
                 default:
                 {
                     DrawEntity(Temp, ORANGE);

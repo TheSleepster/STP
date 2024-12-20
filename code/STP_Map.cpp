@@ -36,11 +36,28 @@ struct stp_level_data
     string *Tilesets;
 
     size_t  CollisionLayerIndexCount;
-    bool32 *CollisionLayerData;
+    int32  *CollisionLayerData;
+
+    size_t  LevelEntityCount;
+    entity *LevelEntities;
 
     size_t LevelLayerCount;
     stp_level_layer_data *Layers;
 };
+
+// NOTE(Sleepster): Entity A is the entity that we would like to act upon, Entity B Is the entity doing the acting
+internal
+ENTITY_ON_COLLIDE_RESPONSE(SpikeCollision)
+{
+    DeleteEntity(A);
+}
+
+internal
+ENTITY_ON_COLLIDE_RESPONSE(StrobbyCollision)
+{
+    DeleteEntity(B);
+    A->DashCounter = 0;
+}
 
 internal stp_level_data*
 ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
@@ -72,7 +89,7 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
 
                     ivec2 TileWorldPosition =
                     {
-                        (TilemapWidthInTiles - 1 - (TileIndex % CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.X)   - LevelData->LevelOffsetX,
+                        (TilemapWidthInTiles   - 1 - (TileIndex % CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.X) - LevelData->LevelOffsetX,
                         (TilemapHeightInTiles  - 1 - (TileIndex / CurrentWorkingLayer->TilemapLayerWidth) * TILE_SIZE.Y) + LevelData->LevelOffsetY,
                     };
 
@@ -90,6 +107,11 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                             Entity->PhysicsBodyData.BodyType = PB_Solid;
                             Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
                             Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
+
+                            if(LevelData->CollisionLayerData[TileIndex] == 2)
+                            {
+                                Entity->OnCollide = &SpikeCollision;
+                            }
                         }
                     }
                 }
@@ -180,7 +202,43 @@ LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
                                 const char *TileColliderStringValue = JSON_get_str(TileValue);
                                 int32 TileColliderValue = atoi(TileColliderStringValue);
                                 
-                                Result->CollisionLayerData[Index++] = (TileColliderValue != 0);
+                                Result->CollisionLayerData[Index++] = TileColliderValue;
+                            }
+                        }
+                    }
+                    else if(LayerName && (strcmp(LayerName, "entity_layer") == 0))
+                    {
+                        JSON_val *EntityArray = JSON_obj_get(Value, "entities");
+                        if(EntityArray)
+                        {
+                            Result->LevelEntityCount = JSON_arr_size(EntityArray);
+                            Result->LevelEntities    = PushArray(&GameState->GameArena, entity, Result->LevelEntityCount);
+                            
+                            size_t EntityIndex   = 0;
+                            size_t MaxEntityIndex= 0;
+                            JSON_val *EntityValue;
+                            JSON_arr_foreach(EntityArray, EntityIndex, MaxEntityIndex, EntityValue)
+                            {
+                                entity *NewEntity = CreateEntity(GameState);
+
+                                JSON_val *Values    = JSON_obj_get(EntityValue, "values");
+                                JSON_val *Archetype = JSON_obj_get(Values, "entity_archetype");
+                                int32     EntityArchetype = atoi(JSON_get_str(Archetype));
+
+                                real32    EntityPositionX = (real32)JSON_get_int(JSON_obj_get(EntityValue, "x"));
+                                real32    EntityPositionY = (real32)JSON_get_int(JSON_obj_get(EntityValue, "y"));
+
+                                NewEntity->Archetype = (entity_arch)EntityArchetype;
+                                NewEntity->Position  = vec2{-EntityPositionX - MapOffset.X,
+                                                            -EntityPositionY + MapOffset.Y};
+                                switch(NewEntity->Archetype)
+                                {
+                                    case ARCH_STROBBY:
+                                    {
+                                        SetupEntityStrobby(NewEntity);
+                                        NewEntity->OnCollide = &StrobbyCollision;
+                                    }break;
+                                }
                             }
                         }
                     }

@@ -1,0 +1,2 @@
+- strobby pickup item
+- deal with the entity problem
