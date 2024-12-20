@@ -32,7 +32,7 @@ typedef Shader          shader;
 
 global_variable real32 DeltaTime;
 
-constexpr uint32 MAX_ENTITIES      = 10000;
+constexpr uint32 MAX_ENTITIES      = 5000;
 constexpr uint32 IterationCounter  = 2;
 constexpr real32 TickRate          = 1 / IterationCounter;
 constexpr real32 InAirFrictionY    = 2.0f;
@@ -64,9 +64,11 @@ enum game_layering
 
 enum entity_flags
 {
-    IS_VALID    = 1 << 0,
-    IS_GRAVITIC = 1 << 1,
-    IS_PICKUP   = 1 << 2,
+    IS_VALID              = 1 << 0,
+    IS_GRAVITIC           = 1 << 1,
+    IS_PICKUP             = 1 << 2,
+    IS_ANIMATED_PLATFORM  = 1 << 3,
+    IS_PLATFORM_IN_MOTION = 1 << 4,
     FlagCount
 };
 
@@ -147,12 +149,21 @@ struct entity
     int32        LayerIndex;
 
     vec2         Position;
+    vec2         PreviousPosition;
+    vec2         TargetPositionA;
+    vec2         TargetPositionB;
+
+    timer        MovingPlatformTravelTimer;
+    timer        MovingPlatformStationaryTimer;
+    
     vec2         RenderSize;
     real32       MovementSpeed;
 
     bool32       IsGrounded;
     bool32       IsJumping;
     bool32       IsDashing;
+    bool32       IsMovingTowardsTarget;
+    bool32       ShouldBeInMotion;
 
     int32        MaxJumps;
     int32        JumpCounter;
@@ -281,7 +292,7 @@ SetupEntityPlayer(entity *Entity)
 internal void
 SetupEntityFloorTile(entity *Entity)
 {
-    Entity->Archetype  = ARCH_MAP_FLOOR;
+    Entity->Archetype  = ARCH_TILE;
     Entity->RenderSize = {400, 10};
     Entity->LayerIndex    = LAYER_Player;
 
@@ -313,6 +324,37 @@ SetupEntityStrobby(entity *Entity)
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
      
     Entity->Flags |= IS_PICKUP;
+}
+
+ENTITY_ON_COLLIDE_RESPONSE(MovePlayerWithPlatform)
+{
+    if(B->ShouldBeInMotion)
+    {
+        vec2 PlatformDeltaPosition = B->Position - B->PreviousPosition;
+        A->Position += (PlatformDeltaPosition + (B->PhysicsBodyData.Velocity * DeltaTime));
+    }
+}
+
+internal void
+SetupEntityMovingPlatform(entity *Entity, vec2 PositionA, vec2 PositionB, real32 TravelTimer, real32 StationaryTimer, vec2 Size)
+{
+    Entity->Archetype  = ARCH_TILE;
+    Entity->RenderSize = Size;
+    Entity->Flags     |= IS_ANIMATED_PLATFORM;
+
+    Entity->Position   = PositionA;
+    Entity->TargetPositionA = PositionA;
+    Entity->TargetPositionB = PositionB;
+
+    Entity->MovingPlatformTravelTimer.TimerDuration     = TravelTimer;
+    Entity->MovingPlatformStationaryTimer.TimerDuration = StationaryTimer;
+
+    Entity->PhysicsBodyData.BodyType = PB_Solid;
+    Entity->PhysicsBodyData.CollisionRect.Position = PositionA;
+    Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
+    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
+
+    Entity->OnCollide = &MovePlayerWithPlatform;
 }
 
 internal void
@@ -634,7 +676,7 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
         }
 
         Body->Velocity    += (Body->Acceleration * DeltaTime);
-        Entity->Position  += Body->Velocity * DeltaTime;
+        Entity->Position  +=  Body->Velocity * DeltaTime;
 
         Body->CollisionRect.Position = Entity->Position;
         Body->CollisionRect.Min = Body->CollisionRect.Position - Body->CollisionRect.HalfSize;
@@ -697,6 +739,52 @@ STPLoadTexture(string Filepath)
     return(Result);
 }
 
+internal void
+UpdateMovingPlatforms(game_state *GameState)
+{
+    for(uint32 EntityIndex = 0;
+        EntityIndex < MAX_ENTITIES;
+        ++EntityIndex)
+    {
+        entity *Entity = &GameState->Entities[EntityIndex];
+        if(((Entity->Flags & IS_VALID) != 0) && ((Entity->Flags & IS_ANIMATED_PLATFORM) != 0))
+        {
+            if(Entity->ShouldBeInMotion)
+            {
+                physics_body *Body = &Entity->PhysicsBodyData;
+                Entity->PreviousPosition = Entity->Position;
+
+                vec2 CurrentTarget = Entity->IsMovingTowardsTarget ? Entity->TargetPositionB : Entity->TargetPositionA;
+                vec2 Difference    = Entity->IsMovingTowardsTarget ? Entity->TargetPositionA : Entity->TargetPositionB;
+                Body->Velocity  = (CurrentTarget - Difference) / Entity->MovingPlatformTravelTimer.TimerDuration;
+
+                Entity->Position += Body->Velocity * DeltaTime;
+                Body->CollisionRect.Position = Entity->Position;
+
+                if(v2Distance(CurrentTarget, Entity->Position) <= EPSILON)
+                {
+                    Entity->IsMovingTowardsTarget = !Entity->IsMovingTowardsTarget;
+                    Entity->ShouldBeInMotion = false;
+                    Entity->PhysicsBodyData.Velocity = vec2{0};
+                    Entity->PreviousPosition = Entity->Position;
+                }
+            }
+            else
+            {
+                if(Entity->MovingPlatformStationaryTimer.TimeElapsed <= Entity->MovingPlatformStationaryTimer.TimerDuration)
+                {
+                    Entity->MovingPlatformStationaryTimer.TimeElapsed += DeltaTime;
+                }
+                else
+                {
+                    Entity->ShouldBeInMotion = true;
+                    Entity->MovingPlatformStationaryTimer.TimeElapsed = 0.0f;
+                }
+            }
+        }
+    }
+}
+
 int 
 main()
 {
@@ -704,7 +792,7 @@ main()
 
     GameState.WindowSizeData = {1920, 1080};
     GameState.Gravity = -500;
-    GameState.MaxG = -400;
+    GameState.MaxG    = -400;
     
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(GameState.WindowSizeData.X, GameState.WindowSizeData.Y, "Save The Prince");
@@ -728,6 +816,10 @@ main()
     entity *Player = CreateEntity(&GameState);
     SetupEntityPlayer(Player);
     Player->Position.Y = 42;
+
+    entity *Platform = CreateEntity(&GameState);
+    SetupEntityMovingPlatform(Platform, vec2{0, 0}, vec2{30, 0}, 1.0f, 2.0f, {100, 10});
+    Platform->LayerIndex = LAYER_Player;
 
     GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/Dungeon/Assets/Assets.png");
     LoadOGMOLevel(&GameState, ivec2{-150, 210});
@@ -767,11 +859,14 @@ main()
             Player->Position.Y = 42;
         }
 
+        UpdateMovingPlatforms(&GameState);
+
         BeginDrawing();
         ClearBackground(DARKGRAY);
-
         BeginMode2D(GameState.SceneCamera);
+
         RadixSort((void *)GameState.Entities, (void *)GameState.EntitySortingBuffer, MAX_ENTITIES, sizeof(entity), offsetof(entity, LayerIndex), 21);
+
         for(uint32 EntityIndex = 0;
             EntityIndex < MAX_ENTITIES;
             ++EntityIndex)
@@ -809,7 +904,14 @@ main()
                         real32(Temp->StaticSprite.SpriteSize.Y)
                     };
 
-                    DrawTexturePro(GameState.Textures[0], TextureSourceRect, SpriteDestRect, rlvec2{0}, 0.0f, WHITE);
+                    if((Temp->Flags & IS_ANIMATED_PLATFORM) == 0)
+                    {
+                        DrawTexturePro(GameState.Textures[0], TextureSourceRect, SpriteDestRect, rlvec2{0}, 0.0f, WHITE);
+                    }
+                    else
+                    {
+                        DrawEntity(Temp, DARKBLUE);
+                    }
                 }break;
                 case ARCH_STROBBY:
                 {

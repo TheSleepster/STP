@@ -1,2 +1,7 @@
+DONESKIS:
 - strobby pickup item
+
+TODO:
 - deal with the entity problem
+- hold S while !jumping, you fall faster
+- spacial partitioning;
