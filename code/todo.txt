@@ -1,7 +1,9 @@
 DONESKIS:
 - strobby pickup item
+- diagonal dashing
 
 TODO:
 - deal with the entity problem
 - hold S while !jumping, you fall faster
-- spacial partitioning;
+- spacial partitioning
+- one-way-platforms

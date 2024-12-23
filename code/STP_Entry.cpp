@@ -32,17 +32,19 @@ typedef Shader          shader;
 
 global_variable real32 DeltaTime;
 
-constexpr uint32 MAX_ENTITIES      = 5000;
+constexpr uint32 MAX_ENTITIES      = 10000;
 constexpr uint32 IterationCounter  = 2;
 constexpr real32 TickRate          = 1 / IterationCounter;
 constexpr real32 InAirFrictionY    = 2.0f;
 constexpr real32 InAirFrictionX    = 24.0f;
 constexpr real32 EPSILON           = 0.2f;
 
-constexpr uint32 GAME_WORLD_WIDTH  = 640;
-constexpr uint32 GAME_WORLD_HEIGHT = 360;
+constexpr uint32 GAME_WORLD_WIDTH  = 320;
+constexpr uint32 GAME_WORLD_HEIGHT = 180;
 
-constexpr ivec2 TILE_SIZE = {16, 16};
+constexpr ivec2 TILE_SIZE = {8, 8};
+
+constexpr real32 CLIMB_SPEED = 2000; 
 
 struct entity;
 #define ENTITY_ON_COLLIDE_RESPONSE(name) void name(entity *A, entity *B)
@@ -69,6 +71,8 @@ enum entity_flags
     IS_PICKUP             = 1 << 2,
     IS_ANIMATED_PLATFORM  = 1 << 3,
     IS_PLATFORM_IN_MOTION = 1 << 4,
+    IS_ONE_WAY_COLLISION  = 1 << 5,
+    IS_CLIMBABLE          = 1 << 6,
     FlagCount
 };
 
@@ -124,11 +128,12 @@ struct static_sprite_data
 
 struct animated_sprite_data
 {
-    ivec2  StartingSpriteOffset;
+    ivec2  AnimationOffset;
     ivec2  SpriteSize;
 
     int32  FrameCount;
     real32 FrameDuration;
+    real32 DelayOnLoop;
 };
 
 struct timer
@@ -147,6 +152,7 @@ struct entity
     uint32       Flags;
     uint32       EntityID;
     int32        LayerIndex;
+    int32        NineSliceSpriteIndex;
 
     vec2         Position;
     vec2         PreviousPosition;
@@ -164,21 +170,24 @@ struct entity
     bool32       IsDashing;
     bool32       IsMovingTowardsTarget;
     bool32       ShouldBeInMotion;
+    bool32       IsClinging;
 
     int32        MaxJumps;
     int32        JumpCounter;
 
     int32        MaxDashes;
     int32        DashCounter;
+    int32        AttachedWallSide;
     
     timer        JumpTimer;
     timer        DashTimer;
     timer        CoyoteTimer;
+    timer        ClingTimer;
     
     physics_body PhysicsBodyData;
 
-    static_sprite_data StaticSprite;
-    animated_sprite_data AnimatedSprite;
+    static_sprite_data      StaticSprite;
+    animated_sprite_data    AnimatedSprite;
 
     entity_on_collide *OnCollide;
 };
@@ -226,6 +235,15 @@ ProcessMovement(entity *Player)
         Player->IsDashing  = true;
         Player->DashCounter++;
     }
+
+    if(IsKeyDown(KEY_W))
+    {
+        Player->PhysicsBodyData.Acceleration.Y =  1.0f;
+    }
+    if(IsKeyDown(KEY_S))
+    {
+        Player->PhysicsBodyData.Acceleration.Y = -1.0f;
+    }
     
     if(IsKeyDown(KEY_A))
     {
@@ -270,7 +288,7 @@ SetupEntityPlayer(entity *Entity)
 {
     Entity->Archetype     = ARCH_PLAYER;
     Entity->MovementSpeed = 3000;
-    Entity->RenderSize    = {16, 16};
+    Entity->RenderSize    = {12, 16};
     Entity->LayerIndex    = LAYER_Player;
 
     Entity->JumpTimer.TimerDuration   = 0.15f;
@@ -283,7 +301,7 @@ SetupEntityPlayer(entity *Entity)
     Entity->MaxDashes = 1;
     Entity->DashCounter = 0;
 
-    Entity->Flags |= IS_GRAVITIC;
+    //Entity->Flags |= IS_GRAVITIC;
 
     Entity->PhysicsBodyData.BodyType = PB_Actor;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
@@ -336,7 +354,7 @@ ENTITY_ON_COLLIDE_RESPONSE(MovePlayerWithPlatform)
 }
 
 internal void
-SetupEntityMovingPlatform(entity *Entity, vec2 PositionA, vec2 PositionB, real32 TravelTimer, real32 StationaryTimer, vec2 Size)
+SetupEntityMovingPlatform(entity *Entity, vec2 PositionA, vec2 PositionB, real32 TravelTimer, real32 StationaryTimer, vec2 Size, int32 LevelIndex)
 {
     Entity->Archetype  = ARCH_TILE;
     Entity->RenderSize = Size;
@@ -562,30 +580,59 @@ EntityCollisionResponse(game_state *GameState, entity *Entity)
             {
                 Result.Collision = true;
                 Result.CollidedEntity = TestEntity;
-                
+                if(Entity->IsDashing)
+                {
+                    Body->Velocity = vec2{0};
+                }
                 Body->Friction = TestBody->Friction;
                 vec2 DepthVector = CalculateCollisionDepth(MinkowskiBody);
                 Result.Depth = DepthVector;
-                if(fabsf(DepthVector.Y) >= EPSILON * 2.0f)
+
+                // NOTE(Sleepster): ONEWAY COLLISION
+                if((TestEntity->Flags & IS_ONE_WAY_COLLISION) != 0)
                 {
-                    Entity->IsGrounded = true;
+                    if(Body->Velocity.Y > 0)
+                    {
+                        continue;
+                    }
                 }
 
-                if(DepthVector.X != 0)
+                // NOTE(Sleepster): WALL CLIMBING
+                if((TestEntity->Flags & IS_CLIMBABLE) != 0)
                 {
-                    Entity->Position.X += DepthVector.X;
-                    Body->Velocity.X = 0;
+                    if(IsKeyDown(KEY_D) || IsKeyDown(KEY_A))
+                    {
+                        Entity->IsClinging = true;
+                        Entity->AttachedWallSide = (DepthVector.X > 0) ? -1 : 1;
+                    }
                 }
-                else if(DepthVector.Y != 0)
+                
+                // NOTE(Sleepster): NO PICKUP COLLISION
+                if((TestEntity->Flags & IS_PICKUP) == 0)
                 {
-                    Entity->Position.Y += DepthVector.Y;
-                    Body->Velocity.Y = 0;
+                    if(fabsf(DepthVector.Y) >= EPSILON * 2.0f)
+                    {
+                        Entity->IsGrounded = true;
+                    }
+
+                    if(DepthVector.X != 0)
+                    {
+                        Entity->Position.X += DepthVector.X;
+                        Body->Velocity.X = 0;
+                    }
+                    if(DepthVector.Y != 0)
+                    {
+                        Entity->Position.Y += DepthVector.Y;
+                        Body->Velocity.Y = 0;
+                    }
+
+                    break;
                 }
-                break;
             }
             else if((MinkowskiBody.Max.Y - MinkowskiBody.Min.Y) > (EPSILON * 4))
             {
                 Entity->IsGrounded = false;
+                Entity->IsClinging = false;
                 Body->Friction.Y = InAirFrictionY;
                 Body->Friction.X = InAirFrictionX;
             }
@@ -659,7 +706,6 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
         // NOTE(Sleepster): DASHING
         if(Entity->IsDashing &&
            !Entity->IsGrounded &&
-           fabsf(Body->Acceleration.X) > 0.0f &&
            Entity->DashCounter <= Entity->MaxDashes)
         {
             Body->Velocity.Y = 0.0f;
@@ -671,8 +717,35 @@ UpdateEntityPhysicsBodyData(game_state *GameState, entity *Entity)
             }
             else
             {
-                Body->Velocity.X += 50.0f * Sign(Body->Velocity.X);
+                vec2 DashDirection = {};
+                if(IsKeyDown(KEY_W)) DashDirection.Y =  1.0f;
+                if(IsKeyDown(KEY_A)) DashDirection.X =  1.0f;
+                if(IsKeyDown(KEY_S)) DashDirection.Y = -1.0f;
+                if(IsKeyDown(KEY_D)) DashDirection.X = -1.0f;
+
+                DashDirection = v2Normalize(DashDirection);
+                real32 DashSpeed = 600;
+
+                Body->Velocity.Y = 0;
+                Body->Velocity = DashDirection * DashSpeed;
             }
+        }
+
+        if(Entity->IsClinging)
+        {
+            if(IsKeyDown(KEY_W))
+            {
+                Body->Velocity.Y = CLIMB_SPEED * DeltaTime;
+            }
+            else if(IsKeyDown(KEY_S))
+            {
+                Body->Velocity.Y = -CLIMB_SPEED * DeltaTime;
+            }
+            else
+            {
+                Body->Velocity.Y = 0;
+            }
+            Body->Velocity.X = 0;
         }
 
         Body->Velocity    += (Body->Acceleration * DeltaTime);
@@ -791,6 +864,7 @@ main()
     game_state  GameState = {};
 
     GameState.WindowSizeData = {1920, 1080};
+    GameState.Gravity = 0;
     GameState.Gravity = -500;
     GameState.MaxG    = -400;
     
@@ -817,12 +891,8 @@ main()
     SetupEntityPlayer(Player);
     Player->Position.Y = 42;
 
-    entity *Platform = CreateEntity(&GameState);
-    SetupEntityMovingPlatform(Platform, vec2{0, 0}, vec2{30, 0}, 1.0f, 2.0f, {100, 10});
-    Platform->LayerIndex = LAYER_Player;
-
-    GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/Dungeon/Assets/Assets.png");
-    LoadOGMOLevel(&GameState, ivec2{-150, 210});
+    GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/NewAtlas.png");
+    //LoadOGMOLevel(&GameState, STR("../data/res/maps/RealTest.json"), 0);
 
     real32 Accumulator = 0;
     while(!WindowShouldClose())
@@ -830,7 +900,6 @@ main()
         GameState.WindowSizeData.X = GetRenderWidth();
         GameState.WindowSizeData.Y = GetRenderHeight();
         
-        //v2Approach(&DrawFrame->SceneCamera.Position, DrawFrame->SceneCamera.Target, 5.0f, Time.Delta);
         GameState.SceneCamera.offset = {real32(GameState.WindowSizeData.X * 0.5f), (real32)(GameState.WindowSizeData.Y * 0.5f)};
         // NOTE(Sleepster): Raylib by default is flipped, meaning a change in the Positive Y direction yields a downward movement.
         // This fixes that but it might introduce some bugs down the line so I'm just putting this here
@@ -879,7 +948,7 @@ main()
                     ProcessMovement(Temp);
 
                     vec2 CameraPosition = vec2{GameState.SceneCamera.target.x, GameState.SceneCamera.target.y};
-                    v2Approach(&CameraPosition, Temp->Position, 10.0f, DeltaTime);
+                    v2Approach(&CameraPosition, Temp->Position, 5.0f, DeltaTime);
                     GameState.SceneCamera.target = Vector2{CameraPosition.X, CameraPosition.Y};
 
                     UpdateEntityPhysicsBodyData(&GameState, Temp);
@@ -910,7 +979,7 @@ main()
                     }
                     else
                     {
-                        DrawEntity(Temp, DARKBLUE);
+                        DrawEntity(Temp, BLUE);
                     }
                 }break;
                 case ARCH_STROBBY:

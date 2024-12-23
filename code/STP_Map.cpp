@@ -5,6 +5,12 @@
    $Creator: Justin Lewis $
    ======================================================================== */
 
+struct array_list
+{
+    void *Data;
+    int32 Length;
+};
+
 struct stp_level_layer_data
 {
     string Name;
@@ -108,27 +114,36 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                             Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
                             Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
 
-                            if(LevelData->CollisionLayerData[TileIndex] == 2)
+                            switch(LevelData->CollisionLayerData[TileIndex])
                             {
-                                Entity->OnCollide = &SpikeCollision;
+                                case 2:
+                                {
+                                    Entity->OnCollide = &SpikeCollision;
+                                }break;
+                                case 3:
+                                {
+                                    Entity->Flags |= IS_ONE_WAY_COLLISION;
+                                }break;
+                                case 4:
+                                {
+                                    Entity->Flags |= IS_CLIMBABLE;
+                                }break;
                             }
                         }
                     }
                 }
-                else continue;
             }
         }
     }
-    
     return(LevelData);
 }
 
 internal stp_level_data*
-LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
+LoadOGMOLevel(game_state *GameState, string Filepath, int32 LevelIndex)
 {
     stp_level_data *Result = PushStruct(&GameState->GameArena, stp_level_data);
     
-    string EntireFile = ReadEntireFileMA(&GameState->GameArena, STR("../data/res/maps/TestLevel.json"));
+    string EntireFile = ReadEntireFileMA(&GameState->GameArena, Filepath);
     if(EntireFile != NULLSTR)
     {
         JSON_doc *JSONData = JSON_read(CSTR(EntireFile), EntireFile.Length, 0);
@@ -140,8 +155,8 @@ LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
                 Result->LevelWidth   = JSON_get_int(JSON_obj_get(JSONRoot, "width"));
                 Result->LevelHeight  = JSON_get_int(JSON_obj_get(JSONRoot, "height"));
 
-                Result->LevelOffsetX = MapOffset.X;
-                Result->LevelOffsetY = MapOffset.Y;
+                Result->LevelOffsetX = JSON_get_int(JSON_obj_get(JSONRoot, "OffsetX"));
+                Result->LevelOffsetY = JSON_get_int(JSON_obj_get(JSONRoot, "OffsetY"));
 
                 JSON_val *LevelTilemapLayers = JSON_obj_get(JSONRoot, "layers");
                 Result->LevelLayerCount = JSON_arr_size(LevelTilemapLayers);
@@ -223,20 +238,45 @@ LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
 
                                 JSON_val *Values    = JSON_obj_get(EntityValue, "values");
                                 JSON_val *Archetype = JSON_obj_get(Values, "entity_archetype");
-                                int32     EntityArchetype = atoi(JSON_get_str(Archetype));
+                                int32     EntityArchetype = JSON_get_int(Archetype);
 
                                 real32    EntityPositionX = (real32)JSON_get_int(JSON_obj_get(EntityValue, "x"));
                                 real32    EntityPositionY = (real32)JSON_get_int(JSON_obj_get(EntityValue, "y"));
 
                                 NewEntity->Archetype = (entity_arch)EntityArchetype;
-                                NewEntity->Position  = vec2{-EntityPositionX - MapOffset.X,
-                                                            -EntityPositionY + MapOffset.Y};
+                                NewEntity->Position  = vec2{-EntityPositionX - Result->LevelOffsetX,
+                                                            -EntityPositionY + Result->LevelOffsetY};
                                 switch(NewEntity->Archetype)
                                 {
                                     case ARCH_STROBBY:
                                     {
                                         SetupEntityStrobby(NewEntity);
                                         NewEntity->OnCollide = &StrobbyCollision;
+                                    }break;
+                                    // NOTE(Sleepster): I'm lazy asf and running out of time so ALL tiles in the entity layer are moving
+                                    case ARCH_TILE:
+                                    {
+                                        JSON_val *TargetJSON = JSON_obj_get(EntityValue, "values");
+                                        real32 EntityTargetPositionBx = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "second_target_x"));
+                                        real32 EntityTargetPositionBy = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "second_target_y"));
+                                        real32 EntityTravelTime       = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "platform_travel_time"));
+                                        real32 EntityStationaryTime   = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "platform_stationary_time"));
+                                        real32 PlatformSizeX          = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "platform_size_x"));
+                                        real32 PlatformSizeY          = (real32)JSON_get_int(JSON_obj_get(TargetJSON, "platform_size_y"));
+
+                                        EntityTargetPositionBx = -EntityTargetPositionBx - Result->LevelOffsetX;
+                                        EntityTargetPositionBy = -EntityTargetPositionBy + Result->LevelOffsetY;
+
+                                        real32 TargetDifferenceX = EntityTargetPositionBx - NewEntity->Position.X;
+                                        real32 TargetDifferenceY = EntityTargetPositionBy - NewEntity->Position.Y;
+
+                                        SetupEntityMovingPlatform(NewEntity,
+                                                                  NewEntity->Position,
+                                                                  {NewEntity->Position.X + TargetDifferenceX, NewEntity->Position.Y - TargetDifferenceY},
+                                                                  EntityTravelTime,
+                                                                  EntityStationaryTime,
+                                                                  vec2{PlatformSizeX, PlatformSizeY},
+                                                                  1);
                                     }break;
                                 }
                             }
@@ -260,4 +300,9 @@ LoadOGMOLevel(game_state *GameState, ivec2 MapOffset)
     }
 
     return(ProcessLoadedMapData(GameState, Result));
+}
+
+internal void
+LoadJSONLevel(game_state *GameState, string Filepath)
+{
 }
