@@ -385,7 +385,6 @@ ProccessJSONLevelData(game_state *GameState, ldtk_map_data *MapData)
                         {
                             SetupEntityStrobby(Entity);
                             Entity->OnCollide = &StrobbyCollision;
-
                         }break;
                         case ARCH_TILE:
                         {
@@ -394,55 +393,24 @@ ProccessJSONLevelData(game_state *GameState, ldtk_map_data *MapData)
 
                     Entity->Position  = vec2{MapData->LevelData[LevelIndex].PixelHeight - ActiveData->WorldX - Entity->RenderSize.X,
                                             (MapData->LevelData[LevelIndex].PixelHeight - ActiveData->WorldY - Entity->RenderSize.Y)};
-                    Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
-                    Entity->PhysicsBodyData.CollisionRect.HalfSize = (Entity->RenderSize * 0.5f);
                 }
             }
-            else if(MapData->LevelData[LevelIndex].LevelLayers[LayerIndex].TileData &&
-                    (strcmp(CSTR(MapData->LevelData[LevelIndex].LevelLayers[LayerIndex].Identifier), "tile_grid")) == 0)
+
+            if(MapData->LevelData[LevelIndex].LevelLayers[LayerIndex].TileData)
             {
-                ldtk_level_layer_data *CollisionLayer = {};
-                for(uint32 TestLayerIndex = 0;
-                    TestLayerIndex < MapData->LevelData[LevelIndex].LayerCount;
-                    ++TestLayerIndex)
-                {
-                    ldtk_level_layer_data *TestLayer = &MapData->LevelData[LevelIndex].LevelLayers[TestLayerIndex];
-                    if(TestLayer && (strcmp(CSTR(TestLayer->Identifier), "collision_mask")) == 0)
-                    {
-                        CollisionLayer = TestLayer;
-                        break;
-                    }
-                }
-                
                 for(int32 TileIndex = 0;
                     TileIndex < MapData->LevelData[LevelIndex].LevelLayers[LayerIndex].TotalTileCount;
                     ++TileIndex)
                 {
                     ldtk_tile_data *Tile = &MapData->LevelData[LevelIndex].LevelLayers[LayerIndex].TileData[TileIndex];
-                    if(Tile->TileValue > 0)
-                    {
-                        entity *Entity = CreateEntity(GameState);
-                        //int32 TileValue;
-                        Entity->Archetype = ARCH_TILE;
-                        Entity->Position  = vec2{MapData->LevelData[LevelIndex].PixelWidth  - (real32)Tile->Position.X - 8,
-                            MapData->LevelData[LevelIndex].PixelHeight - (real32)Tile->Position.Y - 8};
-                        Entity->StaticSprite.AtlasOffset = Tile->AtlasOffset;
-                        Entity->StaticSprite.SpriteSize  = {8, 8};
-                        Entity->LayerIndex = LAYER_Background;
-
-                        if(CollisionLayer && CollisionLayer->TileData[TileIndex].TileValue > 0)
-                        {
-                            Entity->PhysicsBodyData.BodyType = PB_Solid;
-                            Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
-                            Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
-                            switch(CollisionLayer->TileData[TileIndex].TileValue)
-                            {
-                                case 2: Entity->OnCollide = &SpikeCollision; break;
-                                case 3: Entity->Flags    |= IS_ONE_WAY_COLLISION; break;
-                                case 4: Entity->Flags    |= IS_CLIMBABLE; break;
-                            }
-                        }
-                    }
+                    entity *Entity = CreateEntity(GameState);
+                    //int32 TileValue;
+                    Entity->Archetype = ARCH_TILE;
+                    Entity->Position  = vec2{MapData->LevelData[LevelIndex].PixelWidth  - (real32)Tile->Position.X - 8,
+                                             MapData->LevelData[LevelIndex].PixelHeight - (real32)Tile->Position.Y - 8};
+                    Entity->StaticSprite.AtlasOffset = Tile->AtlasOffset;
+                    Entity->StaticSprite.SpriteSize  = {8, 8};
+                    Entity->LayerIndex = LAYER_Background;
                 }
             }
         }
@@ -536,6 +504,7 @@ LoadJSONLevelData(game_state *GameState, string Filepath)
                             CurrentLayer->Type = TYPE_tilemap_data;
                             JSON_val *GridData = JSON_obj_get(LayerData, "intGridCsv");
                             size_t GridSize    = JSON_arr_size(GridData);
+                            CurrentLayer->TotalTileCount = (int32)GridSize; 
                             if(GridSize > 0)
                             {
                                 CurrentLayer->TileData = PushArray(&GameState->GameArena, ldtk_tile_data, GridSize);
@@ -544,49 +513,41 @@ LoadJSONLevelData(game_state *GameState, string Filepath)
                             size_t    GridIndex = 0;
                             size_t    MaxIndex  = 0;
                             JSON_val *GridValue = 0;
-                            int32 MapIndex = 0;
 
+                            int32 MapIndex = 0;
                             JSON_arr_foreach(GridData, GridIndex, MaxIndex, GridValue)
                             {
-                                int32 Temp = JSON_get_int(GridValue);
-                                if(Temp > 0)
-                                {
-                                    CurrentLayer->TileData[MapIndex++].TileValue = Temp;
-                                }
+                                CurrentLayer->TileData[MapIndex++].TileValue = JSON_get_int(GridValue);
                             }
-                            CurrentLayer->TotalTileCount = MapIndex; 
+                            JSON_val *FuckingShitAutoLayerTiling = JSON_obj_get(LayerData, "autoLayerTiles");
 
-                            JSON_val *AutoTilingData = JSON_obj_get(LayerData, "autoLayerTiles");
-                            if(AutoTilingData)
+                            GridIndex = 0;
+                            MaxIndex  = 0;
+                            GridValue = 0;
+                            MapIndex = 0;
+                            JSON_arr_foreach(FuckingShitAutoLayerTiling, GridIndex, MaxIndex, GridValue)
                             {
-                                GridIndex = 0;
-                                MaxIndex  = 0;
-                                GridValue = 0;
-                                MapIndex = 0;
-                                JSON_arr_foreach(AutoTilingData, GridIndex, MaxIndex, GridValue)
+                                ldtk_tile_data *CurrentTile = &CurrentLayer->TileData[MapIndex++];
+                                JSON_val *PixelPositionData = JSON_obj_get(GridValue, "px");
+                                size_t    DimensionCount = 0;
+                                size_t    MaxDimension   = 0;
+                                JSON_val *DimensionValue = 0;
+
+                                int32 Dimension = 0;
+                                JSON_arr_foreach(PixelPositionData, DimensionCount, MaxDimension, DimensionValue)
                                 {
-                                    ldtk_tile_data *CurrentTile = &CurrentLayer->TileData[MapIndex++];
-                                    JSON_val *PixelPositionData = JSON_obj_get(GridValue, "px");
-                                    size_t    DimensionCount = 0;
-                                    size_t    MaxDimension   = 0;
-                                    JSON_val *DimensionValue = 0;
+                                    CurrentTile->Position.Elements[Dimension++] = JSON_get_int(DimensionValue);
+                                }
 
-                                    int32 Dimension = 0;
-                                    JSON_arr_foreach(PixelPositionData, DimensionCount, MaxDimension, DimensionValue)
-                                    {
-                                        CurrentTile->Position.Elements[Dimension++] = JSON_get_int(DimensionValue);
-                                    }
+                                JSON_val *TexelCoordArray = JSON_obj_get(GridValue, "src");
+                                DimensionCount = 0;
+                                MaxDimension   = 0;
+                                DimensionValue = 0;
 
-                                    JSON_val *TexelCoordArray = JSON_obj_get(GridValue, "src");
-                                    DimensionCount = 0;
-                                    MaxDimension   = 0;
-                                    DimensionValue = 0;
-
-                                    Dimension = 0;
-                                    JSON_arr_foreach(TexelCoordArray, DimensionCount, MaxDimension, DimensionValue)
-                                    {
-                                        CurrentTile->AtlasOffset.Elements[Dimension++] = JSON_get_int(DimensionValue);
-                                    }
+                                Dimension = 0;
+                                JSON_arr_foreach(TexelCoordArray, DimensionCount, MaxDimension, DimensionValue)
+                                {
+                                    CurrentTile->AtlasOffset.Elements[Dimension++] = JSON_get_int(DimensionValue);
                                 }
                             }
                         }

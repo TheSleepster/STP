@@ -252,6 +252,16 @@ typedef union ivec2
         int Width;
         int Height;
     };
+
+    int Elements[2];
+    
+#ifdef __cplusplus
+    inline int &operator[](const int &Index)
+    {
+        return Elements[Index];
+    }
+    
+#endif
 }ivec2;
 
 // OPERATOR OVERLOADING

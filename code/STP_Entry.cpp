@@ -6,6 +6,9 @@
    ======================================================================== */
 
 #include <raylib.h>
+
+#define  RAYGUI_IMPLMENTATION
+#include <raygui.h>
 #include <yyjson.h>
 
 #include "Intrinsics.h"
@@ -32,9 +35,11 @@ typedef Shader          shader;
 
 global_variable real32 DeltaTime;
 
-constexpr uint32 MAX_ENTITIES      = 10000;
 constexpr uint32 IterationCounter  = 2;
 constexpr real32 TickRate          = 1 / IterationCounter;
+constexpr real64 UpdateRate        = (1.0 / 60.0);
+
+constexpr uint32 MAX_ENTITIES      = 10000;
 constexpr real32 InAirFrictionY    = 2.0f;
 constexpr real32 InAirFrictionX    = 24.0f;
 constexpr real32 EPSILON           = 0.2f;
@@ -43,7 +48,6 @@ constexpr uint32 GAME_WORLD_WIDTH  = 320;
 constexpr uint32 GAME_WORLD_HEIGHT = 180;
 
 constexpr ivec2 TILE_SIZE = {8, 8};
-
 constexpr real32 CLIMB_SPEED = 2000; 
 
 struct entity;
@@ -61,7 +65,7 @@ enum physics_body_type
 enum game_layering
 {
     LAYER_Background = 0,
-    LAYER_Player = 0,
+    LAYER_Player = 10,
 };
 
 enum entity_flags
@@ -126,16 +130,6 @@ struct static_sprite_data
     ivec2 SpriteSize;
 };
 
-struct animated_sprite_data
-{
-    ivec2  AnimationOffset;
-    ivec2  SpriteSize;
-
-    int32  FrameCount;
-    real32 FrameDuration;
-    real32 DelayOnLoop;
-};
-
 struct timer
 {
     real32 StartTime;
@@ -143,6 +137,49 @@ struct timer
     
     real32 TimeElapsed;
     real32 TimerDuration;
+};
+
+struct animated_sprite_data
+{
+    ivec2  AnimationOffset;
+    ivec2  SpriteSize;
+
+    int32  FrameCount;
+    int32  CurrentFrameIndex;
+    
+    timer  FrameTime;
+    timer  DelayOnLoop;
+};
+
+enum entity_state
+{
+    ES_IDLE,
+    ES_RUNNING,
+    ES_CLIMBING,
+    ES_DASHING,
+    ES_JUMPING,
+    ES_FALLING,
+    ES_DEAD,
+    ES_COUNT
+};
+
+struct game_state;
+#define SM_STATE_CALLBACK(name) void name(game_state *GameState, entity *Entity)
+typedef SM_STATE_CALLBACK(sm_callback);
+
+struct entity_state_callback_data
+{
+    sm_callback *OnEnter;
+    sm_callback *OnUpdate;
+    sm_callback *OnExit;
+};
+
+struct entity_state_machine
+{
+    entity_state PreviousState;
+    entity_state CurrentState;
+    
+    entity_state_callback_data Callbacks[ES_COUNT];
 };
 
 struct entity
@@ -184,12 +221,15 @@ struct entity
     timer        CoyoteTimer;
     timer        ClingTimer;
     
-    physics_body PhysicsBodyData;
+    physics_body          PhysicsBodyData;
+    
+    entity_state_machine  EntityStateManager;   
+    entity_state EntityState;
+    entity_state PreviousState;
+    entity_on_collide    *OnCollide;
 
-    static_sprite_data      StaticSprite;
-    animated_sprite_data    AnimatedSprite;
-
-    entity_on_collide *OnCollide;
+    static_sprite_data    StaticSprite;
+    animated_sprite_data  AnimatedSprite;
 };
 
 struct collision_data
@@ -216,6 +256,8 @@ struct collision_data
 
     entity      *Entities;
     entity      *EntitySortingBuffer;
+
+    vec2         InputAxis;
 };
 
 internal void
@@ -281,30 +323,6 @@ CreateEntity(game_state *GameState)
         }
     }
     return(Result);
-}
-
-internal void
-SetupEntityPlayer(entity *Entity)
-{
-    Entity->Archetype     = ARCH_PLAYER;
-    Entity->MovementSpeed = 3000;
-    Entity->RenderSize    = {12, 16};
-    Entity->LayerIndex    = LAYER_Player;
-
-    Entity->JumpTimer.TimerDuration   = 0.15f;
-    Entity->DashTimer.TimerDuration   = 0.08f;
-    Entity->CoyoteTimer.TimerDuration = 0.15f;
-
-    Entity->MaxJumps = 1;
-    Entity->JumpCounter = 0;
-
-    Entity->MaxDashes = 1;
-    Entity->DashCounter = 0;
-
-    //Entity->Flags |= IS_GRAVITIC;
-
-    Entity->PhysicsBodyData.BodyType = PB_Actor;
-    Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
 }
 
 internal void
@@ -386,6 +404,8 @@ DrawEntity(entity *Entity, Color DrawColor)
 }
 
 #include "STP_Map.cpp"
+#include "STP_Physics.cpp"
+#include "STP_Player.cpp"
 
 internal vec2 
 CalculateCollisionDepth(aabb TestBox)
@@ -858,6 +878,32 @@ UpdateMovingPlatforms(game_state *GameState)
     }
 }
 
+internal void
+DrawEntityAnimatedSprite(game_state *GameState, entity *Entity)
+{
+    ivec2 AtlasOffset = {Entity->AnimatedSprite.AnimationOffset.X + (Entity->AnimatedSprite.SpriteSize.X * Entity->AnimatedSprite.CurrentFrameIndex),
+                         Entity->AnimatedSprite.AnimationOffset.Y};
+    ivec2 SpriteSize  =  Entity->AnimatedSprite.SpriteSize;
+
+    rect TextureSourceRect =
+    {
+        real32(AtlasOffset.X),
+        real32(AtlasOffset.Y),
+        real32(SpriteSize.X) * real32((GameState->InputAxis.X > 0 ) ? -1.0f : (GameState->InputAxis.X < 0) ? 1.0f : -1.0f),
+        real32(SpriteSize.Y) * -1.0f
+    };
+
+    rect SpriteDestRect =
+    {
+        real32(Entity->Position.X - int32(Entity->StaticSprite.SpriteSize.X * 0.5f)),
+        real32(Entity->Position.Y - int32(Entity->StaticSprite.SpriteSize.Y * 0.5f)),
+        real32(Entity->AnimatedSprite.SpriteSize.X),
+        real32(Entity->AnimatedSprite.SpriteSize.Y)
+    };
+
+    DrawTexturePro(GameState->Textures[0], TextureSourceRect, SpriteDestRect, rlvec2{0}, 0.0f, WHITE);
+}
+
 int 
 main()
 {
@@ -892,6 +938,7 @@ main()
     Player->Position.Y = 42;
 
     GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/NewAtlas.png");
+    LoadJSONLevelData(&GameState, STR("../data/res/maps/ldtktest/test.ldtk"));
     //LoadOGMOLevel(&GameState, STR("../data/res/maps/RealTest.json"), 0);
 
     real32 Accumulator = 0;
@@ -915,9 +962,12 @@ main()
         DrawFPS(0, 10);
         DeltaTime = GetFrameTime();
         Accumulator += DeltaTime;
-        if(Accumulator >= 1.0f)
+        if(Accumulator >= UpdateRate)
         {
-            printm("FrameTime: %f\n", DeltaTime * 100);
+            HandlePlayerState(&GameState);
+            UpdateEntityPhysicsData(&GameState);
+            UpdateMovingPlatforms(&GameState);
+            
             Accumulator = 0;
         }
 
@@ -928,14 +978,11 @@ main()
             Player->Position.Y = 42;
         }
 
-        UpdateMovingPlatforms(&GameState);
-
         BeginDrawing();
         ClearBackground(DARKGRAY);
         BeginMode2D(GameState.SceneCamera);
 
         RadixSort((void *)GameState.Entities, (void *)GameState.EntitySortingBuffer, MAX_ENTITIES, sizeof(entity), offsetof(entity, LayerIndex), 21);
-
         for(uint32 EntityIndex = 0;
             EntityIndex < MAX_ENTITIES;
             ++EntityIndex)
@@ -945,6 +992,7 @@ main()
             {
                 case ARCH_PLAYER:
                 {
+                    #if 0
                     ProcessMovement(Temp);
 
                     vec2 CameraPosition = vec2{GameState.SceneCamera.target.x, GameState.SceneCamera.target.y};
@@ -953,7 +1001,9 @@ main()
 
                     UpdateEntityPhysicsBodyData(&GameState, Temp);
                     DrawEntity(Temp, RED);
+                    #endif
 
+                    DrawEntityAnimatedSprite(&GameState, Temp);
                 }break;
                 case ARCH_TILE:
                 {
@@ -961,8 +1011,8 @@ main()
                     {
                         real32(Temp->StaticSprite.AtlasOffset.X),
                         real32(Temp->StaticSprite.AtlasOffset.Y),
-                        real32(Temp->StaticSprite.SpriteSize.X) * -1.0f,
-                        real32(Temp->StaticSprite.SpriteSize.Y) * -1.0f
+                        real32(Temp->StaticSprite.SpriteSize.X),
+                        real32(Temp->StaticSprite.SpriteSize.Y)
                     };
 
                     rect SpriteDestRect =
