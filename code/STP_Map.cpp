@@ -59,6 +59,7 @@ ENTITY_ON_COLLIDE_RESPONSE(StrobbyCollision)
     A->DashCounter = 0;
 }
 
+#if 0
 internal stp_level_data*
 ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
 {
@@ -98,7 +99,6 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                     Entity->Position = v2Cast(TileWorldPosition);
                     Entity->StaticSprite = {.AtlasOffset = TileUVData, .SpriteSize = TILE_SIZE};
                     Entity->LayerIndex = int32(LayerCounter--);
-                    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 
                     if(LevelData->CollisionLayerData)
                     {
@@ -107,6 +107,9 @@ ProcessLoadedMapData(game_state *GameState, stp_level_data *LevelData)
                             Entity->PhysicsBodyData.BodyType = PB_Solid;
                             Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
                             Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
+
+                            Entity->PhysicsBodyData.CollisionRect.Min      = Entity->Position - Entity->PhysicsBodyData.CollisionRect.HalfSize; 
+                            Entity->PhysicsBodyData.CollisionRect.Max      = Entity->Position + Entity->PhysicsBodyData.CollisionRect.HalfSize; 
 
                             switch(LevelData->CollisionLayerData[TileIndex])
                             {
@@ -295,6 +298,7 @@ LoadOGMOLevel(game_state *GameState, string Filepath, int32 LevelIndex)
 
     return(ProcessLoadedMapData(GameState, Result));
 }
+#endif
 
 enum level_layer_type
 {
@@ -433,8 +437,11 @@ ProccessJSONLevelData(game_state *GameState, ldtk_map_data *MapData)
                         if(CollisionLayer && CollisionLayer->TileData[TileIndex].TileValue > 0)
                         {
                             Entity->PhysicsBodyData.BodyType = PB_Solid;
-                            Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
                             Entity->PhysicsBodyData.CollisionRect.Position = Entity->Position;
+                            Entity->PhysicsBodyData.CollisionRect.HalfSize = v2Cast(TILE_SIZE * 0.5f);
+
+                            Entity->PhysicsBodyData.CollisionRect.Min      = Entity->Position - Entity->PhysicsBodyData.CollisionRect.HalfSize * 2.0f; 
+                            Entity->PhysicsBodyData.CollisionRect.Max      = Entity->Position - Entity->PhysicsBodyData.CollisionRect.HalfSize * 2.0f; 
                             switch(CollisionLayer->TileData[TileIndex].TileValue)
                             {
                                 case 2: Entity->OnCollide = &SpikeCollision; break;

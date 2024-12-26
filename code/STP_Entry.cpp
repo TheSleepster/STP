@@ -115,11 +115,6 @@ struct physics_body
     
     vec2  Velocity;
     vec2  Acceleration;
-    vec2  Friction;
-
-    bool32 IsGrounded;
-    bool32 IsGravitic;
-    bool32 IsColliding;
 
     aabb   CollisionRect;
 };
@@ -169,9 +164,9 @@ typedef SM_STATE_CALLBACK(sm_callback);
 
 struct entity_state_callback_data
 {
-    sm_callback *OnEnter;
-    sm_callback *OnUpdate;
-    sm_callback *OnExit;
+    sm_callback *OnStateEnter;
+    sm_callback *OnStateUpdate;
+    sm_callback *OnStateExit;
 };
 
 struct entity_state_machine
@@ -189,10 +184,10 @@ struct entity
     uint32       Flags;
     uint32       EntityID;
     int32        LayerIndex;
-    int32        NineSliceSpriteIndex;
 
     vec2         Position;
     vec2         PreviousPosition;
+    vec2         RenderPosition;
     vec2         TargetPositionA;
     vec2         TargetPositionB;
 
@@ -201,13 +196,15 @@ struct entity
     
     vec2         RenderSize;
     real32       MovementSpeed;
+    real32       ExperiencedGravity;
 
-    bool32       IsGrounded;
-    bool32       IsJumping;
-    bool32       IsDashing;
-    bool32       IsMovingTowardsTarget;
-    bool32       ShouldBeInMotion;
-    bool32       IsClinging;
+    real32       FacingDirection;
+
+    bool8        IsGrounded;
+    bool8        IsJumping;
+    bool8        IsDashing;
+    bool8        CanJump;
+    bool8        CanDash;
 
     int32        MaxJumps;
     int32        JumpCounter;
@@ -222,8 +219,8 @@ struct entity
     timer        ClingTimer;
     
     physics_body          PhysicsBodyData;
-    
     entity_state_machine  EntityStateManager;   
+
     entity_state EntityState;
     entity_state PreviousState;
     entity_on_collide    *OnCollide;
@@ -334,7 +331,6 @@ SetupEntityFloorTile(entity *Entity)
 
     Entity->PhysicsBodyData.BodyType = PB_Solid;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
-    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 }
 
 internal void
@@ -364,11 +360,6 @@ SetupEntityStrobby(entity *Entity)
 
 ENTITY_ON_COLLIDE_RESPONSE(MovePlayerWithPlatform)
 {
-    if(B->ShouldBeInMotion)
-    {
-        vec2 PlatformDeltaPosition = B->Position - B->PreviousPosition;
-        A->Position += (PlatformDeltaPosition + (B->PhysicsBodyData.Velocity * DeltaTime));
-    }
 }
 
 internal void
@@ -388,7 +379,6 @@ SetupEntityMovingPlatform(entity *Entity, vec2 PositionA, vec2 PositionB, real32
     Entity->PhysicsBodyData.BodyType = PB_Solid;
     Entity->PhysicsBodyData.CollisionRect.Position = PositionA;
     Entity->PhysicsBodyData.CollisionRect.HalfSize = Entity->RenderSize * 0.5f;
-    Entity->PhysicsBodyData.Friction = {12.0f, 0.0f};
 
     Entity->OnCollide = &MovePlayerWithPlatform;
 }
@@ -407,6 +397,7 @@ DrawEntity(entity *Entity, Color DrawColor)
 #include "STP_Physics.cpp"
 #include "STP_Player.cpp"
 
+#if 0
 internal vec2 
 CalculateCollisionDepth(aabb TestBox)
 {
@@ -437,36 +428,6 @@ CalculateCollisionDepth(aabb TestBox)
     }
 
     return(Result);
-}
-
-internal inline bool32
-IsWithinBoundsAABB(vec2 Point, aabb AABB)
-{
-    return(Point.X >= AABB.Min.X && Point.X <= AABB.Max.X &&
-           Point.Y >= AABB.Min.Y && Point.Y <= AABB.Max.Y);
-}
-
-
-internal inline aabb
-CalculateMinkowskiDifference(aabb A, aabb B)
-{
-    aabb Result = {};
-    Result.Position = A.Position - B.Position;
-    Result.HalfSize = A.HalfSize + B.HalfSize;
-
-    Result.Min = Result.Position - Result.HalfSize;
-    Result.Max = Result.Position + Result.HalfSize;
-
-    return(Result);
-}
-
-internal bool32
-IsCollision(aabb A, aabb B)
-{
-    aabb Test = CalculateMinkowskiDifference(A, B);
-
-    return(0 >= Test.Min.X && 0 <= Test.Max.X &&
-           0 >= Test.Min.Y && 0 <= Test.Max.Y);
 }
 
 internal collision_data
@@ -820,18 +781,6 @@ AdjustStaticObjectPosition(entity *Entity, vec2 Position)
     Body->CollisionRect.Max = Body->CollisionRect.Position + Body->CollisionRect.HalfSize;
 }
 
-internal inline texture2d
-STPLoadTexture(string Filepath)
-{
-    texture2d Result = {};
-    
-    image2d Image = LoadImage(CSTR(Filepath));
-    ImageFlipVertical(&Image);
-
-    Result = LoadTextureFromImage(Image);
-    return(Result);
-}
-
 internal void
 UpdateMovingPlatforms(game_state *GameState)
 {
@@ -877,9 +826,22 @@ UpdateMovingPlatforms(game_state *GameState)
         }
     }
 }
+#endif 
+internal inline texture2d
+STPLoadTexture(string Filepath)
+{
+    texture2d Result = {};
+    
+    image2d Image = LoadImage(CSTR(Filepath));
+    ImageFlipVertical(&Image);
+
+    Result = LoadTextureFromImage(Image);
+    return(Result);
+}
+
 
 internal void
-DrawEntityAnimatedSprite(game_state *GameState, entity *Entity)
+DrawEntityAnimatedSprite(game_state *GameState, entity *Entity, vec2 RenderPosition)
 {
     ivec2 AtlasOffset = {Entity->AnimatedSprite.AnimationOffset.X + (Entity->AnimatedSprite.SpriteSize.X * Entity->AnimatedSprite.CurrentFrameIndex),
                          Entity->AnimatedSprite.AnimationOffset.Y};
@@ -889,14 +851,23 @@ DrawEntityAnimatedSprite(game_state *GameState, entity *Entity)
     {
         real32(AtlasOffset.X),
         real32(AtlasOffset.Y),
-        real32(SpriteSize.X) * real32((GameState->InputAxis.X > 0 ) ? -1.0f : (GameState->InputAxis.X < 0) ? 1.0f : -1.0f),
+        real32(SpriteSize.X) * real32((Entity->FacingDirection > 0 ) ? -1.0f : (Entity->FacingDirection < 0) ? 1.0f : -1.0f),
         real32(SpriteSize.Y) * -1.0f
     };
 
+    vec2 RenderPos = {}; 
+    if(RenderPosition != vec2{0})
+    {
+        RenderPos = RenderPosition;
+    }
+    else
+    {
+        RenderPos = Entity->Position;
+    }
     rect SpriteDestRect =
     {
-        real32(Entity->Position.X - int32(Entity->StaticSprite.SpriteSize.X * 0.5f)),
-        real32(Entity->Position.Y - int32(Entity->StaticSprite.SpriteSize.Y * 0.5f)),
+        real32(RenderPos.X - int32(Entity->StaticSprite.SpriteSize.X * 0.5f)),
+        real32(RenderPos.Y - int32(Entity->StaticSprite.SpriteSize.Y * 0.5f)),
         real32(Entity->AnimatedSprite.SpriteSize.X),
         real32(Entity->AnimatedSprite.SpriteSize.Y)
     };
@@ -936,8 +907,11 @@ main()
     entity *Player = CreateEntity(&GameState);
     SetupEntityPlayer(Player);
     Player->Position.Y = 42;
+    Player->Position.X = 20;
+    Player->PreviousPosition = Player->Position;
 
     GameState.Textures[GameState.ActiveTextureCount++] = LoadTexture("../data/res/textures/NewAtlas.png");
+    SetTextureFilter(GameState.Textures[0], TEXTURE_FILTER_POINT);
     LoadJSONLevelData(&GameState, STR("../data/res/maps/ldtktest/test.ldtk"));
     //LoadOGMOLevel(&GameState, STR("../data/res/maps/RealTest.json"), 0);
 
@@ -955,20 +929,16 @@ main()
         real32 ZoomY = real32(real32(GameState.WindowSizeData.Y) / real32(GAME_WORLD_HEIGHT));
         GameState.SceneCamera.zoom   = -1.0f * fmaxf(ZoomX, ZoomY);
 
-        Vector2 RaylibMousePos = GetMousePosition();
-        Vector2 RaylibWorldToScreenMousePos = GetScreenToWorld2D(RaylibMousePos, GameState.SceneCamera);
-        vec2    MousePos = vec2{RaylibWorldToScreenMousePos.x, RaylibWorldToScreenMousePos.y};
-
-        DrawFPS(0, 10);
         DeltaTime = GetFrameTime();
         Accumulator += DeltaTime;
-        if(Accumulator >= UpdateRate)
+        while(Accumulator >= UpdateRate)
         {
-            HandlePlayerState(&GameState);
             UpdateEntityPhysicsData(&GameState);
-            UpdateMovingPlatforms(&GameState);
-            
-            Accumulator = 0;
+            HandlePlayerState(&GameState);
+            //UpdateMovingPlatforms(&GameState);
+            printf("DeltaTime: %fms\n", DeltaTime * 1000);
+
+            Accumulator -= UpdateRate;
         }
 
         if(IsKeyPressed(KEY_Y))
@@ -988,6 +958,7 @@ main()
             ++EntityIndex)
         {
             entity *Temp = &GameState.Entities[EntityIndex];
+            if((Temp->Flags & IS_VALID) != 0)
             switch(Temp->Archetype)
             {
                 case ARCH_PLAYER:
@@ -1003,7 +974,13 @@ main()
                     DrawEntity(Temp, RED);
                     #endif
 
-                    DrawEntityAnimatedSprite(&GameState, Temp);
+                    Temp->RenderPosition = v2Lerp(Temp->PreviousPosition, real32(Accumulator / (UpdateRate)), Temp->Position);
+                    Temp->RenderPosition = {roundf(Temp->RenderPosition.X), roundf(Temp->RenderPosition.Y)};
+
+                    vec2 CameraPosition = vec2{0, 42};
+                    GameState.SceneCamera.target = Vector2{CameraPosition.X, CameraPosition.Y};
+
+                    DrawEntityAnimatedSprite(&GameState, Temp, Temp->RenderPosition);
                 }break;
                 case ARCH_TILE:
                 {
@@ -1015,6 +992,8 @@ main()
                         real32(Temp->StaticSprite.SpriteSize.Y)
                     };
 
+                    Temp->RenderPosition = v2Lerp(Temp->PreviousPosition, real32(Accumulator / (UpdateRate)), Temp->Position);
+                    Temp->RenderPosition = {roundf(Temp->RenderPosition.X), roundf(Temp->RenderPosition.Y)};
                     rect SpriteDestRect =
                     {
                         real32(Temp->Position.X - int32(Temp->StaticSprite.SpriteSize.X * 0.5f)),
@@ -1042,6 +1021,7 @@ main()
                 }break;
             }
         }
+        GameState.InputAxis.X = 0.0f;
 
         EndMode2D();
         EndDrawing();
